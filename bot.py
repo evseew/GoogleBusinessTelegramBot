@@ -694,9 +694,16 @@ async def schedule_buffered_processing(user_id: int, chat_id: int, business_conn
         logging.debug(f"{log_prefix} Ожидание {MESSAGE_BUFFER_SECONDS} секунд...")
         await asyncio.sleep(MESSAGE_BUFFER_SECONDS)
 
-        # Таймер сработал. Проверяем, актуальна ли эта задача таймера
+        # --- Добавленное логирование для отладки ---
         task_in_dict = user_message_timers.get(user_id)
+        comparison_result = task_in_dict is not current_task
+        logging.debug(f"{log_prefix} Таймер сработал.")
+        logging.debug(f"{log_prefix}   - Текущая задача (current_task): {current_task}")
+        logging.debug(f"{log_prefix}   - Задача в словаре (task_in_dict): {task_in_dict}")
+        logging.debug(f"{log_prefix}   - Сравнение (task_in_dict is not current_task): {comparison_result}")
+        # --- Конец добавленного логирования ---
 
+        # Таймер сработал. Проверяем, актуальна ли эта задача таймера
         if task_in_dict is not current_task:
             # Если задачи не совпадают, значит, был создан НОВЫЙ таймер.
             # Эта задача устарела, ничего не делаем. Новый таймер сработает позже.
