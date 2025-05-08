@@ -548,14 +548,6 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
             
             try:
                 # ---> НАЧАЛО: Упрощенное создание коллекции <---
-                # Старый код (ЗАКОММЕНТИРОВАН):
-                # try:
-                #     logging.info(f"Попытка удалить коллекцию '{collection_name}', если она существует...")
-                #     chroma_client.delete_collection(name=collection_name)
-                #     logging.info(f"Старая коллекция '{collection_name}' удалена (или не существовала).")
-                # except Exception as e_del_coll:
-                #     logging.warning(f"Не удалось удалить коллекцию '{collection_name}' (возможно, ее и не было): {e_del_coll}")
-                
                 logging.info(f"Попытка создать коллекцию '{collection_name}' (ожидается, что ее нет)...")
                 collection = chroma_client.create_collection(name=collection_name)
                 logging.info(f"Коллекция '{collection_name}' успешно создана.")
@@ -564,22 +556,37 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
                 # ---> НАЧАЛО: Проверка начального количества чанков <---
                 try:
                     initial_count = collection.count()
-                    logging.info(f"НАЧАЛЬНОЕ количество чанков в ЯВНО СОЗДАННОЙ коллекции '{collection_name}': {initial_count}") # Добавил уточнение
+                    logging.info(f"НАЧАЛЬНОЕ количество чанков в ЯВНО СОЗДАННОЙ коллекции '{collection_name}': {initial_count}")
                 except Exception as e_initial_count:
                     logging.error(f"Ошибка при получении начального количества чанков: {e_initial_count}", exc_info=True)
                 # ---> КОНЕЦ: Проверка начального количества чанков <---
 
-            except chromadb.errors.DuplicateCollectionError: # Перехватываем конкретную ошибку, если вдруг rmtree не сработал
-                logging.warning(f"КОНФЛИКТ: Коллекция '{collection_name}' уже существует несмотря на rmtree! Попытка получить ее.")
-                try:
-                    collection = chroma_client.get_collection(name=collection_name)
-                    logging.info(f"КОНФЛИКТ: Существующая коллекция '{collection_name}' получена.")
-                except Exception as e_get_coll_conflict:
-                    logging.error(f"КОНФЛИКТ: Не удалось получить существующую коллекцию '{collection_name}': {e_get_coll_conflict}", exc_info=True)
-                    return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Conflict: Collection already exists and could not be retrieved: {str(e_get_coll_conflict)}"}
-            except Exception as e_coll:
-                 logging.error(f"Ошибка при создании/получении коллекции '{collection_name}': {e_coll}", exc_info=True)
-                 return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Collection creation/access error: {str(e_coll)}"}
+            except chromadb.errors.InternalError as e_internal_chroma:
+                logging.warning(f"Перехвачено chromadb.errors.InternalError: {e_internal_chroma}")
+                # Проверяем, действительно ли ошибка связана с тем, что коллекция уже существует
+                if "already exists" in str(e_internal_chroma).lower() or "already exist" in str(e_internal_chroma).lower():
+                    logging.warning(f"КОНФЛИКТ (InternalError): Коллекция '{collection_name}' уже существует. Попытка получить ее.")
+                    try:
+                        collection = chroma_client.get_collection(name=collection_name)
+                        logging.info(f"КОНФЛИКТ (InternalError): Существующая коллекция '{collection_name}' получена.")
+                        # ---> НАЧАЛО: Проверка начального количества чанков в ПОЛУЧЕННОЙ коллекции <---
+                        try:
+                            initial_count = collection.count()
+                            logging.info(f"НАЧАЛЬНОЕ количество чанков в ПОЛУЧЕННОЙ коллекции '{collection_name}': {initial_count}")
+                        except Exception as e_initial_count_get:
+                            logging.error(f"Ошибка при получении начального количества чанков в ПОЛУЧЕННОЙ коллекции: {e_initial_count_get}", exc_info=True)
+                        # ---> КОНЕЦ: Проверка начального количества чанков в ПОЛУЧЕННОЙ коллекции <---
+                    except Exception as e_get_coll_conflict:
+                        logging.error(f"КОНФЛИКТ (InternalError): Не удалось получить существующую коллекцию '{collection_name}': {e_get_coll_conflict}", exc_info=True)
+                        return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Conflict (InternalError): Collection already exists and could not be retrieved: {str(e_get_coll_conflict)}"}
+                else:
+                    # Если это InternalError, но не про "already exists", то это другая проблема
+                    logging.error(f"Критическая ошибка chromadb.errors.InternalError (не 'already exists'): {e_internal_chroma}", exc_info=True)
+                    return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"ChromaDB InternalError (not 'already exists'): {str(e_internal_chroma)}"}
+            except Exception as e_coll_other:
+                 # Ловим любые другие неожиданные ошибки при создании/получении коллекции
+                 logging.error(f"Неожиданная ошибка при создании/получении коллекции '{collection_name}': {e_coll_other}", exc_info=True)
+                 return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Unexpected collection creation/access error: {str(e_coll_other)}"}
             
             batch_size = 100
             total_added = 0
