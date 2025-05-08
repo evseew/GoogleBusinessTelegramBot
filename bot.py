@@ -416,6 +416,12 @@ async def update_vector_store():
             try:
                 shutil.rmtree(persist_directory)
                 logging.info(f"Старая база данных '{persist_directory}' успешно удалена.")
+                # ---> НАЧАЛО: Проверка после rmtree <---
+                if os.path.exists(os.path.join(persist_directory, "chroma.sqlite3")):
+                    logging.error(f"ОШИБКА ПРОВЕРКИ: chroma.sqlite3 ВСЕ ЕЩЕ СУЩЕСТВУЕТ после rmtree в {persist_directory}!")
+                else:
+                    logging.info(f"ПРОВЕРКА: chroma.sqlite3 не существует в {persist_directory} после rmtree (это хорошо).")
+                # ---> КОНЕЦ: Проверка после rmtree <---
                 time.sleep(0.2) # <--- ДОБАВЛЕНА НЕБОЛЬШАЯ ПАУЗА после удаления
             except Exception as e_rm:
                 logging.error(f"НЕ УДАЛОСЬ удалить старую базу данных '{persist_directory}': {str(e_rm)}. Обновление прервано.", exc_info=True)
@@ -428,6 +434,13 @@ async def update_vector_store():
         try:
             os.makedirs(persist_directory, mode=0o777, exist_ok=True) # <--- ДОБАВЛЕНЫ ПРАВА И ПРОВЕРКА СОЗДАНИЯ
             logging.info(f"Директория '{persist_directory}' создана/проверена с правами 0o777.")
+            # ---> НАЧАЛО: Проверка после makedirs <---
+            sqlite_file_path = os.path.join(persist_directory, "chroma.sqlite3")
+            if os.path.exists(sqlite_file_path):
+                logging.info(f"ПРОВЕРКА: chroma.sqlite3 УЖЕ СУЩЕСТВУЕТ в {persist_directory} после makedirs (до PersistentClient). Права: {oct(os.stat(sqlite_file_path).st_mode)[-4:]}")
+            else:
+                logging.info(f"ПРОВЕРКА: chroma.sqlite3 НЕ существует в {persist_directory} после makedirs (это ожидаемо).")
+            # ---> КОНЕЦ: Проверка после makedirs <---
         except Exception as e_mkdir:
             logging.error(f"НЕ УДАЛОСЬ создать/проверить директорию '{persist_directory}': {str(e_mkdir)}. Обновление прервано.", exc_info=True)
             return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Failed to create/verify DB directory: {str(e_mkdir)}"}
@@ -496,6 +509,12 @@ async def update_vector_store():
             
             chroma_client = chromadb.PersistentClient(path=persist_directory)
             logging.info(f"ChromaDB клиент инициализирован.")
+            # ---> НАЧАЛО: Проверка после PersistentClient <---
+            if os.path.exists(sqlite_file_path):
+                logging.info(f"ПРОВЕРКА: chroma.sqlite3 СУЩЕСТВУЕТ в {persist_directory} после PersistentClient. Права: {oct(os.stat(sqlite_file_path).st_mode)[-4:]}")
+            else:
+                logging.error(f"ОШИБКА ПРОВЕРКИ: chroma.sqlite3 НЕ СУЩЕСТВУЕТ в {persist_directory} после PersistentClient!")
+            # ---> КОНЕЦ: Проверка после PersistentClient <---
             time.sleep(0.5) # <--- ДОБАВЛЕНА НЕБОЛЬШАЯ ПАУЗА
             
             try:
