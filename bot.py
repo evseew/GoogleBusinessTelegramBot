@@ -390,10 +390,14 @@ async def get_relevant_context(query: str, k: int = 3) -> str:
         logging.error(f"Непредвиденная ошибка в get_relevant_context: {str(e)}", exc_info=True)
         return empty_context
 
-async def update_vector_store():
-    """Обновляет векторное хранилище документами из Google Drive, предварительно удаляя старое."""
-    persist_directory = "./local_vector_db"
-    collection_name = "documents" # Определим здесь для использования в helper функции
+async def update_vector_store(chat_id, chunks=None, force_reload=False):
+    """Обновляет векторную базу данных на основе текстовых документов."""
+    collection_name = "documents"
+    # persist_directory = "./local_vector_db"
+    # Используем абсолютный путь вместо относительного
+    persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
+    
+    logging.info(f"Запуск обновления векторной базы данных в '{persist_directory}'...")
 
     def _get_current_chunk_count_or_na():
         """Вспомогательная функция для получения текущего количества чанков или 'N/A'."""
@@ -919,7 +923,7 @@ async def start_command(message: aiogram_types.Message):
 async def run_update_and_notify(chat_id: int):
     """Выполняет обновление базы и уведомляет пользователя."""
     logging.info(f"Запущено обновление базы знаний по команде из чата {chat_id}...")
-    update_result = await update_vector_store()
+    update_result = await update_vector_store(chat_id)
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         if update_result['success']:
@@ -1424,7 +1428,7 @@ async def main():
              logging.critical(f"КРИТИЧЕСКАЯ ОШИБКА: Google Drive недоступен: {drive_err}. Остановка.")
              return
         logging.info("Запуск обновления базы в фоне...")
-        asyncio.create_task(update_vector_store()) # Не ждем завершения здесь
+        asyncio.create_task(update_vector_store(chat_id)) # Не ждем завершения здесь
         dp.include_router(router)
         cleanup_task = asyncio.create_task(periodic_cleanup())
         logging.info("🤖 Бот готов к работе")
