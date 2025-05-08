@@ -393,6 +393,22 @@ async def get_relevant_context(query: str, k: int = 3) -> str:
 async def update_vector_store():
     """Обновляет векторное хранилище документами из Google Drive, предварительно удаляя старое."""
     persist_directory = "./local_vector_db"
+    collection_name = "documents" # Определим здесь для использования в helper функции
+
+    def _get_current_chunk_count_or_na():
+        """Вспомогательная функция для получения текущего количества чанков или 'N/A'."""
+        if not os.path.exists(persist_directory):
+            return 'N/A'
+        try:
+            # Используем временный клиент, чтобы не конфликтовать с основным, если он еще не создан
+            import chromadb
+            client = chromadb.PersistentClient(path=persist_directory)
+            collection = client.get_collection(name=collection_name)
+            return collection.count()
+        except Exception as e:
+            logging.warning(f"Не удалось получить текущее количество чанков: {e}")
+            return 'N/A'
+
     try:
         # --- НАЧАЛО: Удаление старой базы ---
         logging.info(f"Подготовка к обновлению: проверка и удаление старой базы '{persist_directory}'...")
@@ -410,8 +426,10 @@ async def update_vector_store():
         logging.info("Начинаем обновление: получаем данные из Google Drive...")
         documents_data = read_data_from_drive()
         if not documents_data:
-            logging.warning("Не получено данных из Google Drive. Обновление базы знаний прервано.")
-            return True
+            logging.warning("Не получено данных из Google Drive. Обновление базы знаний прервано (нет новых данных).")
+            # База была удалена, так что сейчас она пуста или ее нет
+            return {'success': True, 'added_chunks': 0, 'total_chunks': 0, 'error': "No data from Google Drive"}
+        
         logging.info(f"Получено {len(documents_data)} документов из Google Drive.")
         docs = []
         markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=[("#", "h1"),("##", "h2"),("###", "h3")])
@@ -422,22 +440,19 @@ async def update_vector_store():
             if not isinstance(content_str, str) or not content_str.strip():
                 logging.warning(f"Документ '{doc_name}' пуст, пропускаем.")
                 continue
-            enhanced_content = f"Документ: {doc_name}\n\n{content_str}"
+            enhanced_content = f"Документ: {doc_name}\\n\\n{content_str}"
             is_markdown = doc_name.endswith('.md')
             try:
                 splits = markdown_splitter.split_text(enhanced_content) if is_markdown else text_splitter.split_text(enhanced_content)
                 for split in splits:
-                    # Проверяем тип split (Document или str)
                     if isinstance(split, Document):
                         page_content = split.page_content
                         metadata = split.metadata
                     else:
                         page_content = split
                         metadata = {}
-                    # Добавляем базовые метаданные
                     metadata["source"] = doc_name
                     metadata["doc_type"] = "markdown" if is_markdown else "text"
-                    # Дополнительно делим большие куски
                     if len(page_content) > text_splitter._chunk_size:
                          sub_splits = text_splitter.split_text(page_content)
                          for sub_split in sub_splits:
@@ -447,59 +462,82 @@ async def update_vector_store():
             except Exception as e_doc:
                  logging.error(f"Не удалось обработать '{doc_name}': {str(e_doc)}")
                  continue
+        
         if not docs:
-            logging.warning("После обработки не осталось чанков для добавления в базу.")
-            return True
+            logging.warning("После обработки документов не осталось чанков для добавления в базу.")
+            # База была удалена, так что сейчас она пуста
+            return {'success': True, 'added_chunks': 0, 'total_chunks': 0, 'error': "No processable chunks from documents"}
+        
         logging.info(f"Подготовлено {len(docs)} чанков для базы.")
+        
         try:
-            import chromadb
-            from openai import OpenAI
+            import chromadb # Убедимся, что chromadb импортирован в этой области видимости
+            from openai import OpenAI # Убедимся, что OpenAI импортирован
         except ImportError as ie:
-            logging.error(f"Не установлена библиотека (chromadb или openai): {str(ie)}")
-            return False
+            logging.error(f"Не установлена необходимая библиотека (chromadb или openai): {str(ie)}")
+            return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"ImportError: {str(ie)}"}
+        
         try:
             client = OpenAI()
             model_name = "text-embedding-3-large"
             embed_dim = 1536
-            persist_directory = "./local_vector_db"
-            collection_name = "documents"
+            # persist_directory уже определен выше
+            # collection_name уже определен выше
             logging.info(f"Подготовка ChromaDB в '{persist_directory}'...")
-            os.makedirs(persist_directory, exist_ok=True)
+            os.makedirs(persist_directory, exist_ok=True) # Убедимся, что директория создана (rmtree ее удалил)
+            
             chroma_client = chromadb.PersistentClient(path=persist_directory)
+            
             try:
                 collection = chroma_client.get_or_create_collection(name=collection_name)
                 logging.info(f"Используется коллекция '{collection_name}'")
             except Exception as e_coll:
                  logging.error(f"Ошибка получения/создания коллекции '{collection_name}': {e_coll}")
-                 return False
+                 return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Collection error: {str(e_coll)}"}
+            
             batch_size = 100
             total_added = 0
             ids_to_add = []
             docs_to_add = []
             metadatas_to_add = []
             import hashlib
-            try:
-                 existing_ids_data = collection.get(include=[]) # Get IDs and potentially embeddings/metadata if needed later
-                 existing_ids = set(existing_ids_data["ids"])
-                 logging.info(f"В коллекции уже существует {len(existing_ids)} записей.")
-            except Exception as get_ids_err:
-                 logging.error(f"Не удалось получить существующие ID из коллекции: {get_ids_err}")
-                 existing_ids = set() # Продолжаем без проверки на дубликаты
+            
+            # Поскольку мы удаляем базу каждый раз, existing_ids всегда будет пустым, 
+            # но оставим логику на случай изменения стратегии или для отладки.
+            # В текущей "грубой" реализации existing_ids всегда будет пуст после удаления базы.
+            existing_ids = set() 
+            # try:
+            #      # При "грубом" способе коллекция будет новой, так что get() вернет 0 или ошибку, если она еще не создана.
+            #      # Мы создаем ее через get_or_create_collection.
+            #      # existing_ids_data = collection.get(include=[]) 
+            #      # existing_ids = set(existing_ids_data["ids"])
+            #      # logging.info(f"В (новой) коллекции существует {len(existing_ids)} записей (ожидается 0).")
+            # except Exception as get_ids_err:
+            #      logging.warning(f"Не удалось получить существующие ID из (новой) коллекции (это ожидаемо при полном пересоздании): {get_ids_err}")
+            #      existing_ids = set()
 
-            for i, doc in enumerate(docs):
+            for i, doc_item in enumerate(docs): # Переименовал doc в doc_item, чтобы не конфликтовать с модулем docx
                 hasher = hashlib.sha256()
-                hasher.update(doc.page_content.encode('utf-8'))
-                hasher.update(str(doc.metadata.get('source','N/A')).encode('utf-8'))
+                hasher.update(doc_item.page_content.encode('utf-8'))
+                hasher.update(str(doc_item.metadata.get('source','N/A')).encode('utf-8'))
                 doc_id = hasher.hexdigest()
+                
+                # При "грубом" способе эта проверка всегда будет истинной, так как existing_ids пустое
                 if doc_id not in existing_ids:
                     ids_to_add.append(doc_id)
-                    docs_to_add.append(doc.page_content)
-                    metadatas_to_add.append(doc.metadata)
-            logging.info(f"Необходимо добавить {len(ids_to_add)} новых чанков.")
+                    docs_to_add.append(doc_item.page_content)
+                    metadatas_to_add.append(doc_item.metadata)
+            
+            logging.info(f"Необходимо добавить {len(ids_to_add)} новых чанков (все подготовленные чанки).")
+            
             if not ids_to_add:
-                 logging.info("Нет новых чанков для добавления. База актуальна.")
+                 # Эта ветка при "грубом" способе будет достигнута только если docs был пуст,
+                 # что уже обработано выше. Но на всякий случай оставим.
+                 logging.info("Нет новых чанков для добавления (хотя это неожиданно при полном пересоздании, если были документы).")
                  save_vector_db_creation_time()
-                 return True
+                 # Если база была удалена и ничего не добавлено, то чанков 0
+                 return {'success': True, 'added_chunks': 0, 'total_chunks': 0, 'error': "No chunks to add (unexpected with full recreate)"}
+
             for i in range(0, len(ids_to_add), batch_size):
                 batch_ids = ids_to_add[i:i+batch_size]
                 batch_docs = docs_to_add[i:i+batch_size]
@@ -517,17 +555,39 @@ async def update_vector_store():
                 except Exception as e_batch:
                     logging.error(f"Ошибка при обработке партии {i//batch_size + 1}: {str(e_batch)}", exc_info=True)
                     logging.warning("Пропуск этой партии из-за ошибки.")
-                    continue
-            logging.info(f"Обновление векторного хранилища завершено. Добавлено {total_added} новых чанков.")
-            save_vector_db_creation_time()
-            return True
+                    # Не возвращаем ошибку сразу, чтобы попытаться обработать другие партии,
+                    # но success будет False, если хоть одна партия не удалась.
+                    # Однако, если это readonly ошибка, то все партии не удадутся.
+                    # Мы не можем здесь вернуть success: False, так как это прервет цикл.
+                    # Статус успеха определим после цикла.
+                    # В логах ошибка уже есть.
+                    continue 
+            
+            final_added_chunks = total_added
+            final_total_chunks = 0
+            try:
+                final_total_chunks = collection.count()
+                logging.info(f"Итоговое количество чанков в базе: {final_total_chunks}")
+            except Exception as count_err:
+                logging.warning(f"Не удалось получить итоговое количество чанков после добавления: {count_err}")
+                final_total_chunks = 'N/A'
+
+            if final_added_chunks < len(ids_to_add): # Если добавили меньше, чем собирались (из-за ошибок в партиях)
+                logging.warning(f"Не все чанки были добавлены. Планировалось: {len(ids_to_add)}, добавлено: {final_added_chunks}")
+                save_vector_db_creation_time() # Сохраняем время, даже если были ошибки в партиях
+                return {'success': False, 'added_chunks': final_added_chunks, 'total_chunks': final_total_chunks, 'error': "Errors during batch processing, not all chunks added."}
+            else:
+                logging.info(f"Обновление векторного хранилища завершено. Добавлено {final_added_chunks} новых чанков.")
+                save_vector_db_creation_time()
+                return {'success': True, 'added_chunks': final_added_chunks, 'total_chunks': final_total_chunks}
+
         except Exception as e_chroma:
             logging.error(f"Критическая ошибка при работе с ChromaDB: {str(e_chroma)}", exc_info=True)
-            # Пытаемся вернуть ошибку, но с N/A для чанков
-            return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"ChromaDB error: {str(e_chroma)}"}
+            return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"ChromaDB critical error: {str(e_chroma)}"}
+            
     except Exception as e_main:
         logging.error(f"Критическая ошибка при обновлении векторного хранилища: {str(e_main)}", exc_info=True)
-        return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Main update error: {str(e_main)}"}
+        return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Main update vector store error: {str(e_main)}"}
 
 # --- CHAT WITH ASSISTANT ---
 
