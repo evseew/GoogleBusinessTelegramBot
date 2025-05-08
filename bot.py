@@ -201,7 +201,7 @@ def read_data_from_drive():
                             'name': file_name,
                             'content': content
                         })
-                        logging.info(f"Успешно прочитан файл: {file_name}")
+                        logging.debug(f"Успешно прочитан файл: {file_name}")
                     else:
                          logging.warning(f"Файл '{file_name}' прочитан, но не содержит текста.")
 
@@ -240,7 +240,7 @@ def download_pdf(service, file_id):
         done = False
         while done is False:
             status, done = downloader.next_chunk()
-            logging.debug(f"Скачивание PDF (ID: {file_id}): {int(status.progress() * 100)}%")
+            # logging.debug(f"Скачивание PDF (ID: {file_id}): {int(status.progress() * 100)}%") # Закомментировано
 
         fh.seek(0)
         pdf_reader = PyPDF2.PdfReader(fh)
@@ -268,7 +268,7 @@ def download_docx(service, file_id):
         done = False
         while done is False:
             status, done = downloader.next_chunk()
-            logging.debug(f"Скачивание DOCX (ID: {file_id}): {int(status.progress() * 100)}%")
+            # logging.debug(f"Скачивание DOCX (ID: {file_id}): {int(status.progress() * 100)}%") # Закомментировано
 
         fh.seek(0)
         doc = docx.Document(fh)
@@ -286,7 +286,7 @@ def download_text(service, file_id):
         done = False
         while done is False:
             status, done = downloader.next_chunk()
-            logging.debug(f"Скачивание TXT (ID: {file_id}): {int(status.progress() * 100)}%")
+            # logging.debug(f"Скачивание TXT (ID: {file_id}): {int(status.progress() * 100)}%") # Закомментировано
 
         fh.seek(0)
         content_bytes = fh.getvalue()
@@ -518,20 +518,30 @@ async def update_vector_store():
             time.sleep(0.5) # <--- ДОБАВЛЕНА НЕБОЛЬШАЯ ПАУЗА
             
             try:
-                collection = chroma_client.get_or_create_collection(name=collection_name)
-                logging.info(f"Используется или создана коллекция '{collection_name}'")
+                # ---> НАЧАЛО: Явное удаление и создание коллекции <---
+                try:
+                    logging.info(f"Попытка удалить коллекцию '{collection_name}', если она существует...")
+                    chroma_client.delete_collection(name=collection_name)
+                    logging.info(f"Старая коллекция '{collection_name}' удалена (или не существовала).")
+                except Exception as e_del_coll:
+                    # Ошибки здесь не критичны, возможно коллекции и не было
+                    logging.warning(f"Не удалось удалить коллекцию '{collection_name}' (возможно, ее и не было): {e_del_coll}")
+                
+                collection = chroma_client.create_collection(name=collection_name)
+                logging.info(f"ЯВНО СОЗДАНА коллекция '{collection_name}'")
+                # ---> КОНЕЦ: Явное удаление и создание коллекции <---
 
                 # ---> НАЧАЛО: Проверка начального количества чанков <---
                 try:
                     initial_count = collection.count()
-                    logging.info(f"НАЧАЛЬНОЕ количество чанков в коллекции '{collection_name}': {initial_count}")
+                    logging.info(f"НАЧАЛЬНОЕ количество чанков в ЯВНО СОЗДАННОЙ коллекции '{collection_name}': {initial_count}") # Добавил уточнение
                 except Exception as e_initial_count:
                     logging.error(f"Ошибка при получении начального количества чанков: {e_initial_count}", exc_info=True)
                 # ---> КОНЕЦ: Проверка начального количества чанков <---
 
             except Exception as e_coll:
-                 logging.error(f"Ошибка получения/создания коллекции '{collection_name}': {e_coll}", exc_info=True) # Добавил exc_info
-                 return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Collection error: {str(e_coll)}"}
+                 logging.error(f"Ошибка ЯВНОГО СОЗДАНИЯ коллекции '{collection_name}': {e_coll}", exc_info=True) # Добавил уточнение
+                 return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Collection creation/deletion error: {str(e_coll)}"}
             
             batch_size = 100
             total_added = 0
