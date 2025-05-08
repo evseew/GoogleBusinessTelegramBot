@@ -307,7 +307,30 @@ def download_text(service, file_id):
 
 async def get_relevant_context(query: str, k: int = 3) -> str:
     """Получает релевантный контекст из векторного хранилища."""
-    persist_directory = "./local_vector_db"
+    # ВАЖНО: Для get_relevant_context мы должны знать ПОСЛЕДНЮЮ АКТУАЛЬНУЮ директорию.
+    # Это потребует сохранения имени последней успешной директории где-то (например, в файле или глобальной переменной).
+    # Пока что для теста оставим статический путь, но это нужно будет доработать, если тест с динамическим путем сработает.
+    # persist_directory = "./local_vector_db" # Старый относительный
+    base_persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
+    
+    # --- НАЧАЛО: Логика чтения последней активной директории --- (ЗАГЛУШКА ДЛЯ ТЕСТА)
+    # Эту часть нужно будет реализовать, если тест с динамической директорией пройдет успешно
+    # Например, читать из файла, куда update_vector_store записывает имя последней успешной директории
+    # Пока что будем искать самую последнюю по времени создания поддиректорию в base_persist_directory
+    try:
+        subdirectories = [d for d in os.listdir(base_persist_directory) if os.path.isdir(os.path.join(base_persist_directory, d))]
+        if not subdirectories:
+            logging.error(f"GET_CONTEXT: Нет поддиректорий в {base_persist_directory}. Контекст не используется.")
+            return ""
+        # Сортируем по имени (которое содержит временную метку), чтобы взять самую последнюю
+        latest_subdir_name = sorted(subdirectories)[-1]
+        persist_directory = os.path.join(base_persist_directory, latest_subdir_name)
+        logging.info(f"GET_CONTEXT: Используется последняя директория: {persist_directory}")
+    except Exception as e_find_dir:
+        logging.error(f"GET_CONTEXT: Ошибка поиска последней директории в {base_persist_directory}: {e_find_dir}. Используем базовую.")
+        persist_directory = base_persist_directory # Возврат к старой логике, если не нашли поддиректории
+    # --- КОНЕЦ: Логика чтения последней активной директории ---
+
     collection_name = "documents"
     empty_context = ""
 
@@ -393,9 +416,15 @@ async def get_relevant_context(query: str, k: int = 3) -> str:
 async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
     """Обновляет векторную базу данных на основе текстовых документов."""
     collection_name = "documents"
-    # persist_directory = "./local_vector_db"
-    # Используем абсолютный путь вместо относительного
-    persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
+    
+    # --- НАЧАЛО: Динамическое имя директории для теста ---
+    base_persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
+    timestamp_dir_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    persist_directory = os.path.join(base_persist_directory, timestamp_dir_name) # Создаем поддиректорию с временной меткой
+    logging.info(f"ДИНАМИЧЕСКАЯ ДИРЕКТОРИЯ ДЛЯ ТЕСТА: {persist_directory}")
+    # --- КОНЕЦ: Динамическое имя директории для теста ---
+    
+    # persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db") # Старый вариант
     
     logging.info(f"Запуск обновления векторной базы данных в '{persist_directory}'...")
 
