@@ -416,12 +416,21 @@ async def update_vector_store():
             try:
                 shutil.rmtree(persist_directory)
                 logging.info(f"Старая база данных '{persist_directory}' успешно удалена.")
+                time.sleep(0.2) # <--- ДОБАВЛЕНА НЕБОЛЬШАЯ ПАУЗА после удаления
             except Exception as e_rm:
                 logging.error(f"НЕ УДАЛОСЬ удалить старую базу данных '{persist_directory}': {str(e_rm)}. Обновление прервано.", exc_info=True)
                 return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Failed to remove old DB: {str(e_rm)}"}
         else:
             logging.info(f"Старая база данных '{persist_directory}' не найдена, удаление не требуется.")
         # --- КОНЕЦ: Удаление старой базы ---
+
+        # Создаем директорию с явным указанием прав
+        try:
+            os.makedirs(persist_directory, mode=0o777, exist_ok=True) # <--- ДОБАВЛЕНЫ ПРАВА И ПРОВЕРКА СОЗДАНИЯ
+            logging.info(f"Директория '{persist_directory}' создана/проверена с правами 0o777.")
+        except Exception as e_mkdir:
+            logging.error(f"НЕ УДАЛОСЬ создать/проверить директорию '{persist_directory}': {str(e_mkdir)}. Обновление прервано.", exc_info=True)
+            return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Failed to create/verify DB directory: {str(e_mkdir)}"}
 
         logging.info("Начинаем обновление: получаем данные из Google Drive...")
         documents_data = read_data_from_drive()
@@ -481,18 +490,18 @@ async def update_vector_store():
             client = OpenAI()
             model_name = "text-embedding-3-large"
             embed_dim = 1536
-            # persist_directory уже определен выше
-            # collection_name уже определен выше
-            logging.info(f"Подготовка ChromaDB в '{persist_directory}'...")
-            os.makedirs(persist_directory, exist_ok=True) # Убедимся, что директория создана (rmtree ее удалил)
+            
+            logging.info(f"Инициализация ChromaDB клиента в '{persist_directory}'...")
+            # os.makedirs(persist_directory, mode=0o777, exist_ok=True) # <--- УДАЛЕНО ОТСЮДА, перенесено выше
             
             chroma_client = chromadb.PersistentClient(path=persist_directory)
+            logging.info(f"ChromaDB клиент инициализирован.")
             
             try:
                 collection = chroma_client.get_or_create_collection(name=collection_name)
-                logging.info(f"Используется коллекция '{collection_name}'")
+                logging.info(f"Используется или создана коллекция '{collection_name}'")
             except Exception as e_coll:
-                 logging.error(f"Ошибка получения/создания коллекции '{collection_name}': {e_coll}")
+                 logging.error(f"Ошибка получения/создания коллекции '{collection_name}': {e_coll}", exc_info=True) # Добавил exc_info
                  return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Collection error: {str(e_coll)}"}
             
             batch_size = 100
