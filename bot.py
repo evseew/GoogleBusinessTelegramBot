@@ -391,8 +391,22 @@ async def get_relevant_context(query: str, k: int = 3) -> str:
         return empty_context
 
 async def update_vector_store():
-    """Обновляет векторное хранилище документами из Google Drive"""
+    """Обновляет векторное хранилище документами из Google Drive, предварительно удаляя старое."""
+    persist_directory = "./local_vector_db"
     try:
+        # --- НАЧАЛО: Удаление старой базы ---
+        logging.info(f"Подготовка к обновлению: проверка и удаление старой базы '{persist_directory}'...")
+        if os.path.exists(persist_directory):
+            try:
+                shutil.rmtree(persist_directory)
+                logging.info(f"Старая база данных '{persist_directory}' успешно удалена.")
+            except Exception as e_rm:
+                logging.error(f"НЕ УДАЛОСЬ удалить старую базу данных '{persist_directory}': {str(e_rm)}. Обновление прервано.", exc_info=True)
+                return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Failed to remove old DB: {str(e_rm)}"}
+        else:
+            logging.info(f"Старая база данных '{persist_directory}' не найдена, удаление не требуется.")
+        # --- КОНЕЦ: Удаление старой базы ---
+
         logging.info("Начинаем обновление: получаем данные из Google Drive...")
         documents_data = read_data_from_drive()
         if not documents_data:
@@ -509,10 +523,11 @@ async def update_vector_store():
             return True
         except Exception as e_chroma:
             logging.error(f"Критическая ошибка при работе с ChromaDB: {str(e_chroma)}", exc_info=True)
-            return False
+            # Пытаемся вернуть ошибку, но с N/A для чанков
+            return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"ChromaDB error: {str(e_chroma)}"}
     except Exception as e_main:
         logging.error(f"Критическая ошибка при обновлении векторного хранилища: {str(e_main)}", exc_info=True)
-        return False
+        return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Main update error: {str(e_main)}"}
 
 # --- CHAT WITH ASSISTANT ---
 
@@ -795,15 +810,29 @@ async def start_command(message: aiogram_types.Message):
 
 async def run_update_and_notify(chat_id: int):
     """Выполняет обновление базы и уведомляет пользователя."""
-    logging.info("Запущено обновление базы знаний в фоновом режиме...")
-    success = await update_vector_store()
+    logging.info(f"Запущено обновление базы знаний по команде из чата {chat_id}...")
+    update_result = await update_vector_store()
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        if success:
-            await bot.send_message(chat_id, "✅ База знаний успешно обновлена!")
-            logging.info("Фоновое обновление базы завершено успешно.")
+        if update_result['success']:
+            message_text = (
+                f"✅ База знаний успешно обновлена!\n"
+                f"🕒 Время: {current_time}\n"
+                f"➕ Добавлено новых чанков: {update_result.get('added_chunks', 'N/A')}\n"
+                f"📊 Всего чанков в базе: {update_result.get('total_chunks', 'N/A')}"
+            )
+            await bot.send_message(chat_id, message_text)
+            logging.info(f"Обновление базы (чат {chat_id}) завершено успешно.")
         else:
-            await bot.send_message(chat_id, "⚠️ Произошла ошибка во время обновления базы знаний. Бот будет использовать старые данные (если они есть). Подробности в логах.")
-            logging.error("Фоновое обновление базы завершено с ошибкой.")
+            error_details = update_result.get('error', 'Подробности в основных логах.')
+            message_text = (
+                 f"⚠️ Произошла ошибка во время обновления базы знаний.\n"
+                 f"🕒 Время: {current_time}\n"
+                 f"Бот будет использовать старые данные (если они есть).\n"
+                 f"Детали ошибки: {error_details}"
+            )
+            await bot.send_message(chat_id, message_text)
+            logging.error(f"Обновление базы (чат {chat_id}) завершено с ошибкой: {error_details}")
     except Exception as e:
         logging.error(f"Ошибка при отправке уведомления об обновлении базы в чат {chat_id}: {e}")
 
