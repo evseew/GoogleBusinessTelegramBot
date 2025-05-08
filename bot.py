@@ -307,37 +307,40 @@ def download_text(service, file_id):
 
 async def get_relevant_context(query: str, k: int = 3) -> str:
     """Получает релевантный контекст из векторного хранилища."""
-    # ВАЖНО: Для get_relevant_context мы должны знать ПОСЛЕДНЮЮ АКТУАЛЬНУЮ директорию.
-    # Это потребует сохранения имени последней успешной директории где-то (например, в файле или глобальной переменной).
-    # Пока что для теста оставим статический путь, но это нужно будет доработать, если тест с динамическим путем сработает.
-    # persist_directory = "./local_vector_db" # Старый относительный
-    base_persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
-    
-    # --- НАЧАЛО: Логика чтения последней активной директории --- (ЗАГЛУШКА ДЛЯ ТЕСТА)
-    # Эту часть нужно будет реализовать, если тест с динамической директорией пройдет успешно
-    # Например, читать из файла, куда update_vector_store записывает имя последней успешной директории
-    # Пока что будем искать самую последнюю по времени создания поддиректорию в base_persist_directory
-    try:
-        subdirectories = [d for d in os.listdir(base_persist_directory) if os.path.isdir(os.path.join(base_persist_directory, d))]
-        if not subdirectories:
-            logging.error(f"GET_CONTEXT: Нет поддиректорий в {base_persist_directory}. Контекст не используется.")
-            return ""
-        # Сортируем по имени (которое содержит временную метку), чтобы взять самую последнюю
-        latest_subdir_name = sorted(subdirectories)[-1]
-        persist_directory = os.path.join(base_persist_directory, latest_subdir_name)
-        logging.info(f"GET_CONTEXT: Используется последняя директория: {persist_directory}")
-    except Exception as e_find_dir:
-        logging.error(f"GET_CONTEXT: Ошибка поиска последней директории в {base_persist_directory}: {e_find_dir}. Используем базовую.")
-        persist_directory = base_persist_directory # Возврат к старой логике, если не нашли поддиректории
-    # --- КОНЕЦ: Логика чтения последней активной директории ---
-
     collection_name = "documents"
     empty_context = ""
+    
+    # Определяем базовый путь и файл для хранения пути активной БД
+    base_persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
+    active_db_path_file = os.path.join(base_persist_directory, "active_db_path.txt")
+    persist_directory = None # Инициализируем
+
+    # --- Чтение пути к активной БД --- 
+    try:
+        if os.path.exists(active_db_path_file):
+            with open(active_db_path_file, "r") as f:
+                active_path = f.read().strip()
+            if active_path and os.path.isdir(active_path): # Проверяем, что путь валидный и директория существует
+                persist_directory = active_path
+                logging.info(f"GET_CONTEXT: Используется активная директория из файла: {persist_directory}")
+            else:
+                logging.warning(f"GET_CONTEXT: Путь в файле {active_db_path_file} невалидный ('{active_path}') или директория не существует.")
+        else:
+            logging.warning(f"GET_CONTEXT: Файл {active_db_path_file} не найден. Невозможно определить активную базу.")
+    except Exception as e_read_path:
+        logging.error(f"GET_CONTEXT: Ошибка чтения файла {active_db_path_file}: {e_read_path}")
+
+    # Если не удалось определить активную директорию, выходим
+    if persist_directory is None:
+        logging.error("GET_CONTEXT: Не удалось определить путь к активной базе данных. Контекст не используется.")
+        return empty_context
+    # --- Конец чтения пути --- 
 
     try:
-        if not os.path.exists(persist_directory) or not os.path.isdir(persist_directory):
-            logging.error(f"Директория базы данных не найдена '{persist_directory}'. Контекст не используется.")
-            return empty_context
+        # Убрана проверка на существование persist_directory, т.к. она уже сделана выше при чтении пути
+        # if not os.path.exists(persist_directory) or not os.path.isdir(persist_directory):
+        #     logging.error(f"Директория базы данных не найдена '{persist_directory}'. Контекст не используется.")
+        #     return empty_context
         try:
             import chromadb
             from openai import OpenAI
@@ -417,83 +420,35 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
     """Обновляет векторную базу данных на основе текстовых документов."""
     collection_name = "documents"
     
-    # --- НАЧАЛО: Динамическое имя директории для теста ---
+    # Определяем базовый путь и файл для хранения пути активной БД
     base_persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
-    timestamp_dir_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    persist_directory = os.path.join(base_persist_directory, timestamp_dir_name) # Создаем поддиректорию с временной меткой
-    logging.info(f"ДИНАМИЧЕСКАЯ ДИРЕКТОРИЯ ДЛЯ ТЕСТА: {persist_directory}")
-    # --- КОНЕЦ: Динамическое имя директории для теста ---
-    
-    # persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db") # Старый вариант
-    
-    logging.info(f"Запуск обновления векторной базы данных в '{persist_directory}'...")
+    active_db_path_file = os.path.join(base_persist_directory, "active_db_path.txt")
+    os.makedirs(base_persist_directory, exist_ok=True) # Убедимся, что базовая директория существует
 
-    def _get_current_chunk_count_or_na():
-        """Вспомогательная функция для получения текущего количества чанков или 'N/A'."""
-        if not os.path.exists(persist_directory):
-            return 'N/A'
-        try:
-            # Используем временный клиент, чтобы не конфликтовать с основным, если он еще не создан
-            import chromadb
-            client = chromadb.PersistentClient(path=persist_directory)
-            collection = client.get_collection(name=collection_name)
-            return collection.count()
-        except Exception as e:
-            logging.warning(f"Не удалось получить текущее количество чанков: {e}")
-            return 'N/A'
+    # Генерируем уникальный путь для новой БД
+    timestamp_dir_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    persist_directory = os.path.join(base_persist_directory, timestamp_dir_name) 
+    logging.info(f"Новая директория для обновления БД: {persist_directory}")
+    
+    # Удаляем старую вспомогательную функцию и ее вызовы
+    # def _get_current_chunk_count_or_na(): ... (определение функции удаляется)
+    # Заменяем вызовы _get_current_chunk_count_or_na() на 'N/A' или 0 в блоках except
 
     try:
-        # --- НАЧАЛО: Удаление старой базы ---
-        logging.info(f"Подготовка к обновлению: проверка и удаление старой базы '{persist_directory}'...")
-        if os.path.exists(persist_directory):
-            try:
-                shutil.rmtree(persist_directory)
-                logging.info(f"Старая база данных '{persist_directory}' успешно удалена.")
-                # ---> НАЧАЛО: Проверка после rmtree <---
-                if os.path.exists(os.path.join(persist_directory, "chroma.sqlite3")):
-                    logging.error(f"ОШИБКА ПРОВЕРКИ: chroma.sqlite3 ВСЕ ЕЩЕ СУЩЕСТВУЕТ после rmtree в {persist_directory}!")
-                else:
-                    logging.info(f"ПРОВЕРКА: chroma.sqlite3 не существует в {persist_directory} после rmtree (это хорошо).")
-                # ---> КОНЕЦ: Проверка после rmtree <---
-                time.sleep(0.2) # <--- ДОБАВЛЕНА НЕБОЛЬШАЯ ПАУЗА после удаления
-            except Exception as e_rm:
-                logging.error(f"НЕ УДАЛОСЬ удалить старую базу данных '{persist_directory}': {str(e_rm)}. Обновление прервано.", exc_info=True)
-                return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Failed to remove old DB: {str(e_rm)}"}
-        else:
-            logging.info(f"Старая база данных '{persist_directory}' не найдена, удаление не требуется.")
-        # --- КОНЕЦ: Удаление старой базы ---
-
-        # Создаем директорию с явным указанием прав
+        # --- Создание новой директории ---
+        # Нет необходимости удалять persist_directory, т.к. она каждый раз новая
         try:
-            os.makedirs(persist_directory, mode=0o777, exist_ok=True) # <--- ДОБАВЛЕНЫ ПРАВА И ПРОВЕРКА СОЗДАНИЯ
-            logging.info(f"Директория '{persist_directory}' создана/проверена с правами 0o777.")
-            # ---> НАЧАЛО: Проверка после makedirs <---
-            sqlite_file_path = os.path.join(persist_directory, "chroma.sqlite3")
-            if os.path.exists(sqlite_file_path):
-                logging.info(f"ПРОВЕРКА: chroma.sqlite3 УЖЕ СУЩЕСТВУЕТ в {persist_directory} после makedirs (до PersistentClient). Права: {oct(os.stat(sqlite_file_path).st_mode)[-4:]}")
-            else:
-                logging.info(f"ПРОВЕРКА: chroma.sqlite3 НЕ существует в {persist_directory} после makedirs (это ожидаемо).")
-            
-            # ---> НАЧАЛО: Дополнительное логирование содержимого директории <---
-            try:
-                dir_contents = os.listdir(persist_directory)
-                logging.info(f"ПРОВЕРКА СОДЕРЖИМОГО: Файлы в '{persist_directory}' после makedirs: {dir_contents}")
-                if not dir_contents:
-                    logging.info(f"ПРОВЕРКА СОДЕРЖИМОГО: Директория '{persist_directory}' пуста (это хорошо).")
-            except Exception as e_listdir:
-                logging.error(f"ПРОВЕРКА СОДЕРЖИМОГО: Не удалось прочитать содержимое '{persist_directory}': {e_listdir}")
-            # ---> КОНЕЦ: Дополнительное логирование содержимого директории <---
-            time.sleep(1.0) # <--- УВЕЛИЧЕНА ПАУЗА ДО 1 СЕКУНДЫ ---
-            # ---> КОНЕЦ: Проверка после makedirs <---
+            os.makedirs(persist_directory, mode=0o777, exist_ok=True) 
+            logging.info(f"Целевая директория '{persist_directory}' создана/проверена с правами 0o777.")
         except Exception as e_mkdir:
-            logging.error(f"НЕ УДАЛОСЬ создать/проверить директорию '{persist_directory}': {str(e_mkdir)}. Обновление прервано.", exc_info=True)
-            return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Failed to create/verify DB directory: {str(e_mkdir)}"}
+            logging.error(f"НЕ УДАЛОСЬ создать/проверить целевую директорию '{persist_directory}': {str(e_mkdir)}. Обновление прервано.", exc_info=True)
+            return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Failed to create target dir: {str(e_mkdir)}"} # Используем 'N/A'
 
         logging.info("Начинаем обновление: получаем данные из Google Drive...")
         documents_data = read_data_from_drive()
         if not documents_data:
             logging.warning("Не получено данных из Google Drive. Обновление базы знаний прервано (нет новых данных).")
-            # База была удалена, так что сейчас она пуста или ее нет
+            # Если нет данных, нет смысла создавать пустую базу и чистить старые
             return {'success': True, 'added_chunks': 0, 'total_chunks': 0, 'error': "No data from Google Drive"}
         
         logging.info(f"Получено {len(documents_data)} документов из Google Drive.")
@@ -506,7 +461,7 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
             if not isinstance(content_str, str) or not content_str.strip():
                 logging.warning(f"Документ '{doc_name}' пуст, пропускаем.")
                 continue
-            enhanced_content = f"Документ: {doc_name}\\n\\n{content_str}"
+            enhanced_content = f"Документ: {doc_name}\\\\n\\\\n{content_str}"
             is_markdown = doc_name.endswith('.md')
             try:
                 splits = markdown_splitter.split_text(enhanced_content) if is_markdown else text_splitter.split_text(enhanced_content)
@@ -531,27 +486,26 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
         
         if not docs:
             logging.warning("После обработки документов не осталось чанков для добавления в базу.")
-            # База была удалена, так что сейчас она пуста
+            # Если нет чанков, нет смысла создавать пустую базу и чистить старые
             return {'success': True, 'added_chunks': 0, 'total_chunks': 0, 'error': "No processable chunks from documents"}
         
         logging.info(f"Подготовлено {len(docs)} чанков для базы.")
         
         try:
-            import chromadb # Убедимся, что chromadb импортирован в этой области видимости
-            from openai import OpenAI # Убедимся, что OpenAI импортирован
+            import chromadb 
+            from openai import OpenAI 
         except ImportError as ie:
             logging.error(f"Не установлена необходимая библиотека (chromadb или openai): {str(ie)}")
-            return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"ImportError: {str(ie)}"}
+            return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"ImportError: {str(ie)}"} # Используем 'N/A'
         
         try:
             client = OpenAI()
             model_name = "text-embedding-3-large"
             embed_dim = 1536
             
-            # ---> НАЧАЛО: Проверка прав на запись <---
+            # ---> НАЧАЛО: Проверка прав на запись <---\n            
             logging.info(f"Проверка прав на запись в директорию: {persist_directory}")
             try:
-                # Попытка создать временный файл для проверки записи
                 test_file_path = os.path.join(persist_directory, "write_test.tmp")
                 with open(test_file_path, "w") as f:
                     f.write("test")
@@ -559,114 +513,113 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
                 logging.info(f"ПРОВЕРКА ПРАВ: Директория '{persist_directory}' доступна для записи.")
             except Exception as e_write_test:
                 logging.error(f"ОШИБКА ПРАВ: Директория '{persist_directory}' НЕ доступна для записи: {e_write_test}", exc_info=True)
-                return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Directory not writable: {persist_directory}. Error: {e_write_test}"}
-            # ---> КОНЕЦ: Проверка прав на запись <---
-
-            logging.info(f"Инициализация ChromaDB клиента в '{persist_directory}'...")
-            # os.makedirs(persist_directory, mode=0o777, exist_ok=True) # <--- УДАЛЕНО ОТСЮДА, перенесено выше
+                # Удаляем неудачно созданную директорию перед выходом
+                try: shutil.rmtree(persist_directory) 
+                except: pass
+                return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Directory not writable: {persist_directory}. Error: {e_write_test}"} # Используем 'N/A'
+            # ---> КОНЕЦ: Проверка прав на запись <---\n
             
+            logging.info(f"Инициализация ChromaDB клиента в '{persist_directory}'...")
             chroma_client = chromadb.PersistentClient(path=persist_directory)
             logging.info(f"ChromaDB клиент инициализирован.")
-            # ---> НАЧАЛО: Проверка после PersistentClient <---
+            # Проверка создания файла БД
+            sqlite_file_path = os.path.join(persist_directory, "chroma.sqlite3")
             if os.path.exists(sqlite_file_path):
                 logging.info(f"ПРОВЕРКА: chroma.sqlite3 СУЩЕСТВУЕТ в {persist_directory} после PersistentClient. Права: {oct(os.stat(sqlite_file_path).st_mode)[-4:]}")
             else:
-                logging.error(f"ОШИБКА ПРОВЕРКИ: chroma.sqlite3 НЕ СУЩЕСТВУЕТ в {persist_directory} после PersistentClient!")
-            # ---> КОНЕЦ: Проверка после PersistentClient <---
-            time.sleep(1.0) # <--- УВЕЛИЧЕНА ПАУЗА ДО 1 СЕКУНДЫ ---
+                # Это все еще может быть проблемой, но с уникальным путем менее вероятно
+                logging.warning(f"ПРЕДУПРЕЖДЕНИЕ ПРОВЕРКИ: chroma.sqlite3 НЕ СУЩЕСТВУЕТ в {persist_directory} после PersistentClient!")
+
+            time.sleep(1.0) # Оставим небольшую паузу на всякий случай
             
+            collection = None # Инициализируем переменную
             try:
-                # ---> НАЧАЛО: Упрощенное создание коллекции <---
+                # ---> НАЧАЛО: Упрощенное создание коллекции <---\n                
                 logging.info(f"Попытка создать коллекцию '{collection_name}' (ожидается, что ее нет)...")
                 collection = chroma_client.create_collection(name=collection_name)
                 logging.info(f"Коллекция '{collection_name}' успешно создана.")
-                # ---> КОНЕЦ: Упрощенное создание коллекции <---
-
-                # ---> НАЧАЛО: Проверка начального количества чанков <---
+                # ---> КОНЕЦ: Упрощенное создание коллекции <---\n
+                # ---> НАЧАЛО: Проверка начального количества чанков <---\n                
                 try:
                     initial_count = collection.count()
                     logging.info(f"НАЧАЛЬНОЕ количество чанков в ЯВНО СОЗДАННОЙ коллекции '{collection_name}': {initial_count}")
                 except Exception as e_initial_count:
                     logging.error(f"Ошибка при получении начального количества чанков: {e_initial_count}", exc_info=True)
-                # ---> КОНЕЦ: Проверка начального количества чанков <---
-
+                # ---> КОНЕЦ: Проверка начального количества чанков <---\n
+            
             except chromadb.errors.InternalError as e_internal_chroma:
+                # Эта ветка не должна срабатывать при уникальном пути, но оставим для надежности
                 logging.warning(f"Перехвачено chromadb.errors.InternalError: {e_internal_chroma}")
-                # Проверяем, действительно ли ошибка связана с тем, что коллекция уже существует
                 if "already exists" in str(e_internal_chroma).lower() or "already exist" in str(e_internal_chroma).lower():
-                    logging.warning(f"КОНФЛИКТ (InternalError): Коллекция '{collection_name}' уже существует. Попытка получить ее.")
+                    logging.warning(f"КОНФЛИКТ (InternalError): Коллекция '{collection_name}' уже существует несмотря на уникальный путь! Попытка получить ее.")
                     try:
                         collection = chroma_client.get_collection(name=collection_name)
                         logging.info(f"КОНФЛИКТ (InternalError): Существующая коллекция '{collection_name}' получена.")
-                        # ---> НАЧАЛО: Проверка начального количества чанков в ПОЛУЧЕННОЙ коллекции <---
+                        # Проверка чанков в полученной коллекции
                         try:
                             initial_count = collection.count()
                             logging.info(f"НАЧАЛЬНОЕ количество чанков в ПОЛУЧЕННОЙ коллекции '{collection_name}': {initial_count}")
                         except Exception as e_initial_count_get:
                             logging.error(f"Ошибка при получении начального количества чанков в ПОЛУЧЕННОЙ коллекции: {e_initial_count_get}", exc_info=True)
-                        # ---> КОНЕЦ: Проверка начального количества чанков в ПОЛУЧЕННОЙ коллекции <---
                     except Exception as e_get_coll_conflict:
                         logging.error(f"КОНФЛИКТ (InternalError): Не удалось получить существующую коллекцию '{collection_name}': {e_get_coll_conflict}", exc_info=True)
-                        return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Conflict (InternalError): Collection already exists and could not be retrieved: {str(e_get_coll_conflict)}"}
+                        try: shutil.rmtree(persist_directory) 
+                        except: pass
+                        return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Conflict (InternalError): Collection already exists and could not be retrieved: {str(e_get_coll_conflict)}"} # 'N/A'
                 else:
-                    # Если это InternalError, но не про "already exists", то это другая проблема
                     logging.error(f"Критическая ошибка chromadb.errors.InternalError (не 'already exists'): {e_internal_chroma}", exc_info=True)
-                    return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"ChromaDB InternalError (not 'already exists'): {str(e_internal_chroma)}"}
+                    try: shutil.rmtree(persist_directory) 
+                    except: pass
+                    return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"ChromaDB InternalError (not 'already exists'): {str(e_internal_chroma)}"} # 'N/A'
             except Exception as e_coll_other:
-                 # Ловим любые другие неожиданные ошибки при создании/получении коллекции
                  logging.error(f"Неожиданная ошибка при создании/получении коллекции '{collection_name}': {e_coll_other}", exc_info=True)
-                 return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Unexpected collection creation/access error: {str(e_coll_other)}"}
-            
+                 try: shutil.rmtree(persist_directory) 
+                 except: pass
+                 return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Unexpected collection creation/access error: {str(e_coll_other)}"} # 'N/A'
+
+            if collection is None: # Если коллекция так и не была успешно создана или получена
+                logging.error("Не удалось инициализировать объект коллекции.")
+                try: shutil.rmtree(persist_directory) 
+                except: pass
+                return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': "Failed to initialize collection object"} # 'N/A'
+
+            # ... (код подготовки ids_to_add, docs_to_add, metadatas_to_add остается прежним) ...
             batch_size = 100
             total_added = 0
             ids_to_add = []
             docs_to_add = []
             metadatas_to_add = []
             import hashlib
-            
-            # Поскольку мы удаляем базу каждый раз, existing_ids всегда будет пустым, 
-            # но оставим логику на случай изменения стратегии или для отладки.
-            # В текущей "грубой" реализации existing_ids всегда будет пуст после удаления базы.
-            existing_ids = set() 
-            # try:
-            #      # При "грубом" способе коллекция будет новой, так что get() вернет 0 или ошибку, если она еще не создана.
-            #      # Мы создаем ее через get_or_create_collection.
-            #      # existing_ids_data = collection.get(include=[]) 
-            #      # existing_ids = set(existing_ids_data["ids"])
-            #      # logging.info(f"В (новой) коллекции существует {len(existing_ids)} записей (ожидается 0).")
-            # except Exception as get_ids_err:
-            #      logging.warning(f"Не удалось получить существующие ID из (новой) коллекции (это ожидаемо при полном пересоздании): {get_ids_err}")
-            #      existing_ids = set()
-
-            for i, doc_item in enumerate(docs): # Переименовал doc в doc_item, чтобы не конфликтовать с модулем docx
+            existing_ids = set() # При уникальном пути всегда пусто
+            for i, doc_item in enumerate(docs):
                 hasher = hashlib.sha256()
                 hasher.update(doc_item.page_content.encode('utf-8'))
                 hasher.update(str(doc_item.metadata.get('source','N/A')).encode('utf-8'))
                 doc_id = hasher.hexdigest()
-                
-                # При "грубом" способе эта проверка всегда будет истинной, так как existing_ids пустое
                 if doc_id not in existing_ids:
                     ids_to_add.append(doc_id)
                     docs_to_add.append(doc_item.page_content)
                     metadatas_to_add.append(doc_item.metadata)
-            
-            logging.info(f"Необходимо добавить {len(ids_to_add)} новых чанков (все подготовленные чанки).")
-            
-            if not ids_to_add:
-                 # Эта ветка при "грубом" способе будет достигнута только если docs был пуст,
-                 # что уже обработано выше. Но на всякий случай оставим.
-                 logging.info("Нет новых чанков для добавления (хотя это неожиданно при полном пересоздании, если были документы).")
-                 save_vector_db_creation_time()
-                 # Если база была удалена и ничего не добавлено, то чанков 0
-                 return {'success': True, 'added_chunks': 0, 'total_chunks': 0, 'error': "No chunks to add (unexpected with full recreate)"}
 
+            logging.info(f"Необходимо добавить {len(ids_to_add)} новых чанков.")
+            if not ids_to_add:
+                 logging.info("Нет новых чанков для добавления.")
+                 # Нет смысла сохранять пустую базу и чистить старые
+                 try: shutil.rmtree(persist_directory) 
+                 except: pass
+                 return {'success': True, 'added_chunks': 0, 'total_chunks': 0, 'error': "No chunks to add"}
+
+            # --- Цикл добавления батчей ---
+            batch_errors = False
             for i in range(0, len(ids_to_add), batch_size):
+                # ... (код получения батчей и embeddings) ...
                 batch_ids = ids_to_add[i:i+batch_size]
                 batch_docs = docs_to_add[i:i+batch_size]
                 batch_metadatas = metadatas_to_add[i:i+batch_size]
                 current_batch_size = len(batch_ids)
                 logging.info(f"Обработка партии {i//batch_size + 1}/{(len(ids_to_add) - 1)//batch_size + 1} ({current_batch_size} чанков)...")
                 try:
+                    # ... (код получения embeddings) ...
                     logging.debug(f"Получение {current_batch_size} embeddings...")
                     embeddings_response = client.embeddings.create(input=batch_docs, model=model_name, dimensions=embed_dim)
                     batch_embeddings = [e.embedding for e in embeddings_response.data]
@@ -677,12 +630,7 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
                 except Exception as e_batch:
                     logging.error(f"Ошибка при обработке партии {i//batch_size + 1}: {str(e_batch)}", exc_info=True)
                     logging.warning("Пропуск этой партии из-за ошибки.")
-                    # Не возвращаем ошибку сразу, чтобы попытаться обработать другие партии,
-                    # но success будет False, если хоть одна партия не удалась.
-                    # Однако, если это readonly ошибка, то все партии не удадутся.
-                    # Мы не можем здесь вернуть success: False, так как это прервет цикл.
-                    # Статус успеха определим после цикла.
-                    # В логах ошибка уже есть.
+                    batch_errors = True # Помечаем, что была ошибка
                     continue 
             
             final_added_chunks = total_added
@@ -694,123 +642,87 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
                 logging.warning(f"Не удалось получить итоговое количество чанков после добавления: {count_err}")
                 final_total_chunks = 'N/A'
 
-            if final_added_chunks < len(ids_to_add): # Если добавили меньше, чем собирались (из-за ошибок в партиях)
+            if batch_errors or final_added_chunks < len(ids_to_add): 
+                error_msg = "Errors during batch processing, not all chunks added."
                 logging.warning(f"Не все чанки были добавлены. Планировалось: {len(ids_to_add)}, добавлено: {final_added_chunks}")
-                save_vector_db_creation_time() # Сохраняем время, даже если были ошибки в партиях
-                return {'success': False, 'added_chunks': final_added_chunks, 'total_chunks': final_total_chunks, 'error': "Errors during batch processing, not all chunks added."}
+                # Не сохраняем путь к неполной базе и не чистим старые
+                try: shutil.rmtree(persist_directory) # Удаляем неудачную попытку
+                except Exception as e_rm_fail: logging.warning(f"Не удалось удалить директорию с неполной базой {persist_directory}: {e_rm_fail}")
+                return {'success': False, 'added_chunks': final_added_chunks, 'total_chunks': final_total_chunks, 'error': error_msg}
             else:
-                logging.info(f"Обновление векторного хранилища завершено. Добавлено {final_added_chunks} новых чанков.")
-                save_vector_db_creation_time()
+                # --- УСПЕШНОЕ ЗАВЕРШЕНИЕ ---
+                logging.info(f"Обновление векторного хранилища успешно завершено. Добавлено {final_added_chunks} новых чанков.")
+                
+                # --- Сохраняем путь к активной базе ---
+                try:
+                    with open(active_db_path_file, "w") as f:
+                        f.write(persist_directory)
+                    logging.info(f"Путь к активной базе '{persist_directory}' сохранен в: {active_db_path_file}")
+                except Exception as e_save_path:
+                    logging.error(f"НЕ УДАЛОСЬ сохранить путь к активной базе '{persist_directory}' в файл {active_db_path_file}: {e_save_path}")
+                    # Обновление прошло, но путь не сохранен - это проблема для get_context
+                    # Возвращаем успех, но с предупреждением
+                    return {'success': True, 'added_chunks': final_added_chunks, 'total_chunks': final_total_chunks, 'warning': f"DB updated but failed to save active path: {e_save_path}"}
+                
+                # --- Очистка старых директорий ---
+                logging.info(f"Очистка старых директорий баз данных в {base_persist_directory}...")
+                cleaned_count = 0
+                try:
+                    for item in os.listdir(base_persist_directory):
+                        item_path = os.path.join(base_persist_directory, item)
+                        # Удаляем только директории, имя которых похоже на метку времени, и не текущую
+                        if os.path.isdir(item_path) and item != timestamp_dir_name and re.match(r'^\\d{8}_\\d{6}_\\d{6}$', item):
+                            try:
+                                shutil.rmtree(item_path)
+                                logging.info(f"Удалена старая директория базы данных: {item_path}")
+                                cleaned_count += 1
+                            except Exception as e_clean:
+                                logging.warning(f"Не удалось удалить старую директорию {item_path}: {e_clean}")
+                    logging.info(f"Очистка завершена. Удалено старых директорий: {cleaned_count}")
+                except Exception as e_list_clean:
+                    logging.warning(f"Ошибка при получении списка для очистки старых директорий: {e_list_clean}")
+
+                save_vector_db_creation_time() # Сохраняем время в last_update.txt (для информации)
                 return {'success': True, 'added_chunks': final_added_chunks, 'total_chunks': final_total_chunks}
 
         except Exception as e_chroma:
             logging.error(f"Критическая ошибка при работе с ChromaDB: {str(e_chroma)}", exc_info=True)
-            return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"ChromaDB critical error: {str(e_chroma)}"}
+            try: shutil.rmtree(persist_directory) # Удаляем неудачную попытку
+            except: pass
+            return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"ChromaDB critical error: {str(e_chroma)}"} # 'N/A'
             
     except Exception as e_main:
         logging.error(f"Критическая ошибка при обновлении векторного хранилища: {str(e_main)}", exc_info=True)
-        return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Main update vector store error: {str(e_main)}"}
+        # Неясно, была ли создана директория, поэтому не пытаемся ее удалять здесь
+        return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Main update vector store error: {str(e_main)}"} # 'N/A'
 
-# --- CHAT WITH ASSISTANT ---
+# --- Удаление старой функции ---
+# Определение функции _get_current_chunk_count_or_na должно быть полностью удалено из файла.
+# Я не могу явно удалить функцию, но убедитесь, что ее определения больше нет.
 
-async def chat_with_assistant(user_id, message_text):
-    """Отправляет сообщение ассистенту и получает ответ"""
+def _get_active_db_path():
+    """Читает и возвращает путь к активной базе данных из файла."""
+    base_persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
+    active_db_path_file = os.path.join(base_persist_directory, "active_db_path.txt")
     try:
-        thread_id = await get_or_create_thread(user_id)
-        client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        logging.debug(f"Начало chat_with_assistant для user_id {user_id}, thread_id {thread_id}")
-        logging.info(f"Текст запроса для ассистента (начало): '{message_text[:200]}...'")
-        asyncio.create_task(cleanup_old_context_logs())
-        context = ""
-        if USE_VECTOR_STORE:
-            logging.debug(f"Получение контекста из базы для user_id {user_id}...")
-            context = await get_relevant_context(message_text)
-            if context:
-                logging.info(f"Используется контекст из базы (длина {len(context)}).")
-                asyncio.create_task(log_context(user_id, message_text, context))
+        if os.path.exists(active_db_path_file):
+            with open(active_db_path_file, "r") as f:
+                active_path = f.read().strip()
+            if active_path and os.path.isdir(active_path):
+                logging.info(f"_get_active_db_path: Найден активный путь: {active_path}")
+                return active_path
             else:
-                logging.info("Контекст из базы не найден или не используется.")
-        full_prompt = f"Контекст:\n{context}\n\n---\n\nВопрос пользователя:\n{message_text}" if context else message_text
-        logging.debug(f"Полный промпт для OpenAI (начало): {full_prompt[:300]}...")
-        try:
-            runs = client.beta.threads.runs.list(thread_id=thread_id, limit=5)
-            for run in runs.data:
-                if run.status in ['queued', 'in_progress', 'requires_action']:
-                    logging.warning(f"Обнаружен активный run {run.id} ({run.status}). Отменяем...")
-                    try:
-                        client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run.id)
-                        logging.info(f"Run {run.id} отменен.")
-                    except Exception as cancel_error:
-                        if 'already completed' not in str(cancel_error).lower():
-                             logging.warning(f"Не удалось отменить run {run.id}: {cancel_error}")
-        except Exception as list_runs_error:
-            logging.warning(f"Ошибка при проверке/отмене активных запусков: {list_runs_error}")
-        try:
-            logging.debug(f"Добавление сообщения в тред {thread_id}...")
-            client.beta.threads.messages.create(thread_id=thread_id, role="user", content=full_prompt)
-            logging.debug("Сообщение добавлено.")
-        except Exception as add_msg_err:
-             logging.error(f"Ошибка добавления сообщения в тред {thread_id}: {add_msg_err}", exc_info=True)
-             return "Извините, произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте еще раз."
-        try:
-            logging.debug(f"Запуск ассистента {ASSISTANT_ID} для треда {thread_id}...")
-            run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
-            logging.info(f"Запущен run {run.id} для треда {thread_id}.")
-        except Exception as run_create_err:
-             logging.error(f"Ошибка запуска ассистента для треда {thread_id}: {run_create_err}", exc_info=True)
-             return "Извините, не удалось запустить обработку вашего запроса. Попробуйте позже."
-        max_wait_time = 90
-        start_time = time.time()
-        run_status = None
-        while time.time() - start_time < max_wait_time:
-            try:
-                run_status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-                logging.debug(f"Статус run {run.id}: {run_status.status}")
-                if run_status.status == 'completed':
-                    logging.info(f"Run {run.id} успешно завершен.")
-                    break
-                elif run_status.status in ['failed', 'cancelled', 'expired']:
-                    logging.error(f"Run {run.id} завершился с ошибкой: {run_status.status}. Последняя ошибка: {run_status.last_error}")
-                    error_message = "К сожалению, произошла ошибка при обработке вашего запроса."
-                    if run_status.last_error:
-                         error_message += f" ({run_status.last_error.code}: {run_status.last_error.message})"
-                    return error_message
-                elif run_status.status == 'requires_action':
-                     logging.warning(f"Run {run.id} требует действия (Function Calling не реализован).")
-                     client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run.id)
-                     return "Извините, ассистент запросил действие, которое я пока не умею выполнять."
-            except Exception as retrieve_err:
-                 logging.warning(f"Ошибка получения статуса run {run.id}: {retrieve_err}")
-            await asyncio.sleep(2)
-        if run_status and run_status.status != 'completed':
-            logging.warning(f"Превышено время ожидания ({max_wait_time} сек) для run {run.id}. Статус: {run_status.status}. Отменяем...")
-            try: 
-                client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run.id)
-            except Exception as cancel_err:
-                logging.debug(f"Не удалось отменить run при истечении времени: {cancel_err}")
-            return "Извините, обработка вашего запроса заняла слишком много времени. Попробуйте разбить его на части или повторить позже."
-        try:
-            logging.debug(f"Получение сообщений из треда {thread_id} после run {run.id}...")
-            messages = client.beta.threads.messages.list(thread_id=thread_id, order="desc")
-            assistant_message = None
-            for msg in messages.data:
-                if msg.run_id == run.id and msg.role == "assistant":
-                     if msg.content and msg.content[0].type == 'text':
-                         assistant_message = msg.content[0].text.value
-                         logging.info(f"Найдено сообщение ассистента для run {run.id}.")
-                         break
-            if assistant_message:
-                logging.debug(f"Ответ ассистента (начало): {assistant_message[:200]}...")
-                await add_message_to_history(user_id, "user", message_text)
-                await add_message_to_history(user_id, "assistant", assistant_message)
-                return assistant_message
-            else:
-                logging.error(f"Не найдено сообщение от ассистента для run {run.id} в треде {thread_id}.")
-                return "Извините, ассистент не смог сформировать ответ."
-        except Exception as list_msg_err:
-            logging.error(f"Ошибка получения сообщений из треда {thread_id}: {list_msg_err}", exc_info=True)
-            return "Произошла ошибка при получении ответа от ассистента."
+                logging.warning(f"_get_active_db_path: Путь в файле {active_db_path_file} невалидный ('{active_path}') или директория не существует.")
+                return None
+        else:
+            logging.warning(f"_get_active_db_path: Файл {active_db_path_file} не найден.")
+            return None
     except Exception as e:
+        logging.error(f"_get_active_db_path: Ошибка чтения файла {active_db_path_file}: {e}")
+        return None
+
+# Код обработки документов и разбивки на чанки (placeholder)
+# ...
         logging.error(f"Критическая ошибка в chat_with_assistant для user_id {user_id}: {str(e)}", exc_info=True)
         return f"Произошла внутренняя ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже."
 
@@ -1104,66 +1016,91 @@ async def update_knowledge(message: aiogram_types.Message):
 
 @router.message(Command("check_db"))
 async def check_database(message: aiogram_types.Message):
-    """Проверяет наличие и содержимое векторной базы знаний."""
-    persist_directory = "./local_vector_db"
-    if os.path.exists(persist_directory) and os.path.isdir(persist_directory):
-        files_list = []
+    """Проверяет наличие и содержимое активной векторной базы знаний."""
+    active_persist_directory = _get_active_db_path()
+    
+    if not active_persist_directory:
+        await message.answer("❌ Активная база знаний не определена (файл пути не найден или некорректен).")
+        return
+
+    # Проверка существования активной директории (хотя _get_active_db_path это уже делает)
+    if not os.path.exists(active_persist_directory) or not os.path.isdir(active_persist_directory):
+        await message.answer(f"❌ Активная директория базы '{active_persist_directory}', указанная в файле, не найдена!")
+        return
+        
+    files_list = []
+    try:
+        files_list = os.listdir(active_persist_directory)
+        # Пытаемся подключиться и получить количество записей
+        import chromadb
+        client = chromadb.PersistentClient(path=active_persist_directory)
         try:
-            files_list = os.listdir(persist_directory)
-            # Пытаемся подключиться и получить количество записей
-            import chromadb
-            client = chromadb.PersistentClient(path=persist_directory)
-            try:
-                collection = client.get_collection("documents")
-                count = collection.count()
-                await message.answer(f"✅ База '{persist_directory}' существует ({count} зап.).\nФайлы: {', '.join(files_list)}")
-            except Exception as e:
-                 await message.answer(f"✅ База '{persist_directory}' существует, но ошибка доступа к коллекции 'documents': {e}\nФайлы: {', '.join(files_list)}")
-        except ImportError:
-             await message.answer(f"✅ Директория '{persist_directory}' существует.\nФайлы: {', '.join(files_list)}\n(chromadb не импортирован)")
+            collection = client.get_collection("documents")
+            count = collection.count()
+            await message.answer(f"✅ Активная база: '{active_persist_directory}' ({count} зап.).\nФайлы: {', '.join(files_list)}")
         except Exception as e:
-             files_str = ", ".join(files_list) if files_list else "(не удалось прочитать)"
-             await message.answer(f"✅ Директория '{persist_directory}' существует.\nФайлы: {files_str}\n(Ошибка доступа к базе: {e})")
-    else:
-        await message.answer(f"❌ База знаний '{persist_directory}' не найдена.")
+             await message.answer(f"✅ Активная база: '{active_persist_directory}' существует, но ошибка доступа к коллекции 'documents': {e}\nФайлы: {', '.join(files_list)}")
+    except ImportError:
+         await message.answer(f"✅ Активная директория: '{active_persist_directory}'.\nФайлы: {', '.join(files_list)}\n(chromadb не импортирован для проверки коллекции)")
+    except Exception as e:
+         files_str = ", ".join(files_list) if files_list else "(не удалось прочитать)"
+         await message.answer(f"✅ Активная директория: '{active_persist_directory}'.\nФайлы: {files_str}\n(Ошибка доступа к базе/директории: {e})")
 
 @router.message(Command("debug_db"))
 async def debug_database(message: aiogram_types.Message):
-    """Диагностика базы данных векторов."""
+    """Диагностика активной базы данных векторов."""
     try:
-        await message.answer("🔍 Проверяю базу векторов...")
-        persist_directory = "./local_vector_db"
-        if not os.path.exists(persist_directory) or not os.path.isdir(persist_directory):
-            await message.answer("❌ Директория базы не существует!")
+        await message.answer("🔍 Проверяю активную базу векторов...")
+        active_persist_directory = _get_active_db_path()
+
+        if not active_persist_directory:
+            await message.answer("❌ Активная база знаний не определена (файл пути не найден или некорректен).")
+            # Дополнительно проверим базовую директорию на всякий случай
+            base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
+            if os.path.exists(base_dir):
+                await message.answer(f"Базовая директория '{base_dir}' существует.")
+            else:
+                await message.answer(f"Базовая директория '{base_dir}' не существует.")
             return
-        db_time = get_vector_db_creation_time()
-        time_str = db_time.strftime("%d.%m.%Y %H:%M:%S") if db_time else "Не определено"
-        await message.answer(f"📅 Время обновления (файл/мод.): {time_str}")
+
+        await message.answer(f"📂 Активный путь базы: {active_persist_directory}")
+
+        # Проверка существования (хотя _get_active_db_path это уже делает)
+        if not os.path.exists(active_persist_directory) or not os.path.isdir(active_persist_directory):
+            await message.answer(f"❌ Директория активной базы '{active_persist_directory}', указанная в файле, не найдена!")
+            return
+            
+        db_time = get_vector_db_creation_time() # Время последнего успешного ЗАВЕРШЕНИЯ обновления
+        time_str = db_time.strftime("%d.%m.%Y %H:%M:%S") if db_time else "Не определено (last_update.txt)"
+        await message.answer(f"📅 Время последнего успешного обновления (из last_update.txt): {time_str}")
+        
         try:
-            files = os.listdir(persist_directory)
-            await message.answer(f"📂 Файлы в базе: {', '.join(files)}")
+            files = os.listdir(active_persist_directory)
+            await message.answer(f"📄 Файлы в активной базе: {', '.join(files)}")
         except Exception as list_err:
-             await message.answer(f"❌ Не удалось прочитать файлы в директории: {list_err}")
+             await message.answer(f"❌ Не удалось прочитать файлы в активной директории: {list_err}")
+
         try:
             import chromadb
-            client = chromadb.PersistentClient(path=persist_directory)
-            await message.answer("✅ Клиент ChromaDB создан.")
+            client = chromadb.PersistentClient(path=active_persist_directory)
+            await message.answer("✅ Клиент ChromaDB для активной базы создан.")
             try:
                 collection = client.get_collection("documents")
                 count = collection.count()
-                await message.answer(f"✅ Коллекция 'documents' ({count} зап.).")
-                await message.answer("⏳ Тестовый запрос 'тест'...")
-                test_context = await get_relevant_context("тест", k=1)
+                await message.answer(f"✅ Коллекция 'documents' в активной базе ({count} зап.).")
+                await message.answer("⏳ Тестовый запрос 'тест' к активной базе...")
+                # get_relevant_context уже использует _get_active_db_path внутри себя
+                test_context = await get_relevant_context("тест", k=1) 
                 if test_context:
-                    await message.answer(f"✅ Запрос успешен. Контекст:\n{test_context[:500]}...")
+                    await message.answer(f"✅ Запрос к активной базе успешен. Контекст:\n{test_context[:500]}...")
                 else:
-                     await message.answer("⚠️ Запрос выполнен, контекст не найден.")
+                     await message.answer("⚠️ Запрос к активной базе выполнен, контекст не найден.")
             except Exception as e_coll:
-                await message.answer(f"❌ Ошибка доступа к коллекции: {str(e_coll)}")
+                await message.answer(f"❌ Ошибка доступа к коллекции в активной базе: {str(e_coll)}")
         except ImportError:
             await message.answer("❌ chromadb не импортирован.")
         except Exception as e_client:
-            await message.answer(f"❌ Ошибка клиента ChromaDB: {str(e_client)}")
+            await message.answer(f"❌ Ошибка клиента ChromaDB для активной базы: {str(e_client)}")
     except Exception as e_main:
         await message.answer(f"❌ Ошибка диагностики: {str(e_main)}")
 
@@ -1183,36 +1120,60 @@ async def full_debug(message: aiogram_types.Message):
     try:
         await message.answer("🔎 Запускаю полную диагностику...")
         current_dir = os.getcwd()
-        await message.answer(f"📂 Рабочая директория: {current_dir}")
-        db_paths = ["./local_vector_db", os.path.join(current_dir, "local_vector_db")]
-        found_path = None
-        for path in db_paths:
-            if os.path.exists(path) and os.path.isdir(path):
-                await message.answer(f"✅ Путь к базе: {path}")
-                found_path = path
-                try:
-                    files = os.listdir(path)
-                    file_count = len(files)
-                    await message.answer(f"📄 Файлов в директории: {file_count}")
-                    if file_count > 0:
-                         # Размер и время модификации
-                         total_size = sum(os.path.getsize(os.path.join(path, f)) for f in files if os.path.isfile(os.path.join(path, f)))
-                         await message.answer(f"📊 Общий размер: {total_size/1024/1024:.2f} МБ")
-                         try:
-                             latest_mod = max(os.path.getmtime(os.path.join(path, f)) for f in files if os.path.isfile(os.path.join(path, f)))
-                             mod_time = datetime.fromtimestamp(latest_mod)
-                             await message.answer(f"🕒 Последнее изменение: {mod_time.strftime('%d.%m.%Y %H:%M:%S')}")
-                         except ValueError:
-                              await message.answer("🕒 Нет файлов для определения времени.")
-                         except Exception as e_time:
-                              await message.answer(f"❌ Ошибка времени изменения: {str(e_time)}")
-                except Exception as e_list:
-                     await message.answer(f"❌ Ошибка листинга {path}: {str(e_list)}")
-            else:
-                await message.answer(f"❌ Путь не существует: {path}")
+        await message.answer(f"🐍 Рабочая директория python: {current_dir}")
+        
+        # --- Проверка активной базы --- 
+        active_persist_directory = _get_active_db_path()
+        if active_persist_directory:
+            await message.answer(f"✅ Активный путь базы данных (из файла): {active_persist_directory}")
+        else:
+            await message.answer("⚠️ Активный путь базы данных не определен (файл пути не найден/некорректен).")
+        # --- Конец проверки активной базы ---
+        
+        # --- Проверка базовой директории (остается полезной для обзора) ---
+        base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
+        await message.answer(f"📂 Проверяемая базовая директория: {base_dir}")
+        
+        # Убираем лишний db_paths, проверяем только base_dir
+        # db_paths = ["./local_vector_db", os.path.join(current_dir, "local_vector_db")]
+        # found_path = None 
+        # for path in db_paths:
+        
+        if os.path.exists(base_dir) and os.path.isdir(base_dir):
+            await message.answer(f"✅ Базовая директория существует.")
+            # found_path = base_dir
+            try:
+                items = os.listdir(base_dir)
+                subdirs = [d for d in items if os.path.isdir(os.path.join(base_dir, d)) and re.match(r'^\\d{8}_\\d{6}_\\d{6}$', d)]
+                other_files = [f for f in items if os.path.isfile(os.path.join(base_dir, f))]
+                
+                await message.answer(f"📄 Поддиректорий с базами данных (похожих на временные метки): {len(subdirs)}")
+                if subdirs:
+                    await message.answer(f"   (Последние 5: {", ".join(sorted(subdirs)[-5:])})")
+                await message.answer(f"📄 Других файлов в базовой директории: {len(other_files)} ({", ".join(other_files)})")
+                    
+                # Размер и время модификации самой базовой директории (не очень информативно)
+                # total_size = sum(os.path.getsize(os.path.join(base_dir, f)) for f in items if os.path.isfile(os.path.join(base_dir, f)))
+                # await message.answer(f"📊 Общий размер файлов в базовой директории: {total_size/1024/1024:.2f} МБ")
+                # try:
+                #      latest_mod = max(os.path.getmtime(os.path.join(base_dir, f)) for f in items if os.path.isfile(os.path.join(base_dir, f)))
+                #      mod_time = datetime.fromtimestamp(latest_mod)
+                #      await message.answer(f"🕒 Последнее изменение файла в базовой директории: {mod_time.strftime('%d.%m.%Y %H:%M:%S')}")
+                # except ValueError:
+                #       await message.answer("🕒 Нет файлов для определения времени.")
+                # except Exception as e_time:
+                #       await message.answer(f"❌ Ошибка времени изменения: {str(e_time)}")
+            except Exception as e_list:
+                 await message.answer(f"❌ Ошибка листинга {base_dir}: {str(e_list)}")
+        else:
+            await message.answer(f"❌ Базовая директория не существует: {base_dir}")
+        # --- Конец проверки базовой директории ---
+        
+        # Время из last_update.txt все еще может быть полезно
         db_time_from_file = get_vector_db_creation_time()
         time_str = db_time_from_file.strftime("%d.%m.%Y %H:%M:%S") if db_time_from_file else "Не найдено"
-        await message.answer(f"📅 Время из last_update.txt/мод.: {time_str}")
+        await message.answer(f"📅 Время последнего УСПЕШНОГО обновления (из last_update.txt): {time_str}")
+        
         await message.answer("✅ Диагностика путей завершена.")
     except Exception as e:
         await message.answer(f"❌ Ошибка диагностики: {str(e)}")
