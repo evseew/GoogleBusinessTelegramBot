@@ -1152,7 +1152,9 @@ async def full_debug(message: aiogram_types.Message):
                     # Исправляем f-string для корректного отображения
                     last_five_sorted_subdirs = ", ".join(sorted(subdirs)[-5:])
                     await message.answer(f"   (Последние 5 отсортированных поддиректорий: {last_five_sorted_subdirs})")
-                await message.answer(f"📄 Других файлов в базовой директории: {len(other_files)} ({", ".join(other_files)})")
+                # Исправляем f-string для корректного отображения списка файлов
+                other_files_str = ", ".join(other_files)
+                await message.answer(f"📄 Других файлов в базовой директории: {len(other_files)} ({other_files_str})")
                     
                 # Размер и время модификации самой базовой директории (не очень информативно)
                 # total_size = sum(os.path.getsize(os.path.join(base_dir, f)) for f in items if os.path.isfile(os.path.join(base_dir, f)))
