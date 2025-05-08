@@ -1448,6 +1448,42 @@ async def log_context(user_id, query, context):
     except Exception as e:
         logging.error(f"Ошибка логирования контекста для user_id {user_id}: {str(e)}")
 
+# --- НОВАЯ ФУНКЦИЯ ДЛЯ ОТЧЕТА АДМИНУ ---
+async def notify_admin_of_update_result(update_result: dict):
+    """Отправляет отчет о результатах обновления базы администратору."""
+    log_prefix = "notify_admin_of_update_result:"
+    if not ADMIN_USER_ID:
+        logging.warning(f"{log_prefix} ADMIN_USER_ID не установлен. Невозможно отправить отчет.")
+        return
+
+    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if update_result.get('success'):
+            message_text = (
+                f"✅ Ежедневное обновление базы знаний УСПЕШНО завершено!\n"
+                f"🕒 Время: {current_time_str}\n"
+                f"➕ Добавлено новых чанков: {update_result.get('added_chunks', 'N/A')}\n"
+                f"📊 Всего чанков в базе: {update_result.get('total_chunks', 'N/A')}"
+            )
+            if 'warning' in update_result:
+                message_text += f"\n⚠️ Предупреждение: {update_result['warning']}"
+            log_level = logging.INFO
+        else:
+            error_details = update_result.get('error', 'Подробности в основных логах.')
+            message_text = (
+                 f"❌ ОШИБКА ежедневного обновления базы знаний!\n"
+                 f"🕒 Время: {current_time_str}\n"
+                 f"Детали ошибки: {error_details}"
+            )
+            log_level = logging.ERROR
+        
+        logging.log(log_level, f"{log_prefix} {message_text}") # Логируем сам отчет
+        await bot.send_message(ADMIN_USER_ID, message_text)
+        logging.info(f"{log_prefix} Отчет об обновлении отправлен администратору (ID: {ADMIN_USER_ID}).")
+
+    except Exception as e:
+        logging.error(f"{log_prefix} Ошибка при отправке отчета администратору: {e}", exc_info=True)
+
 # --- НОВАЯ/ВОССТАНОВЛЕННАЯ ФУНКЦИЯ ---
 async def chat_with_assistant(user_id: int, user_input: str) -> str:
     """
@@ -1590,6 +1626,7 @@ async def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     cleanup_task = None
+    daily_update_task = None # Инициализируем переменную
     try:
         logging.info("📁 Проверка Google Drive...")
         try:
@@ -1598,10 +1635,12 @@ async def main():
         except Exception as drive_err:
              logging.critical(f"КРИТИЧЕСКАЯ ОШИБКА: Google Drive недоступен: {drive_err}. Остановка.")
              return
-        logging.info("Запуск обновления базы в фоне...")
-        asyncio.create_task(update_vector_store()) # Не ждем завершения здесь
+        logging.info("Запуск обновления базы в фоне при старте...")
+        asyncio.create_task(update_vector_store()) # Оставляем обновление при старте (без отчета)
         dp.include_router(router)
-        cleanup_task = asyncio.create_task(periodic_cleanup())
+        # Запуск фоновых задач
+        cleanup_task = asyncio.create_task(periodic_cleanup()) 
+        daily_update_task = asyncio.create_task(daily_database_update()) # Запускаем ежедневное обновление
         logging.info("🤖 Бот готов к работе")
         logging.info(f"⏱️ Буферизация: {MESSAGE_BUFFER_SECONDS} сек")
         await dp.start_polling(bot)
@@ -1611,15 +1650,20 @@ async def main():
         logging.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА при работе бота: {str(e)}", exc_info=True)
     finally:
         logging.info("Остановка бота...")
+        # Отменяем фоновые задачи
         if cleanup_task and not cleanup_task.done():
             cleanup_task.cancel()
             logging.info("Задача очистки логов отменена.")
+        if daily_update_task and not daily_update_task.done(): # Добавляем отмену для ежедневного обновления
+            daily_update_task.cancel()
+            logging.info("Задача ежедневного обновления базы отменена.")
+            
         active_timers = list(user_message_timers.values())
         if active_timers:
              logging.info(f"Отмена {len(active_timers)} таймеров обработки...")
              for timer_task in active_timers:
                  timer_task.cancel()
-             await asyncio.sleep(1)
+             await asyncio.sleep(1) # Даем время на отмену
         try:
              await bot.session.close()
              logging.info("Сессия бота закрыта.")
@@ -1676,6 +1720,48 @@ def signal_handler(sig, frame):
     # Остановка должна произойти в finally блока main
     logging.info(f"Сигнал {signame} обработан. Завершение...")
     # Не вызываем sys.exit(), чтобы finally в main мог выполниться
+
+# --- НОВАЯ ФУНКЦИЯ ДЛЯ ЕЖЕДНЕВНОГО ОБНОВЛЕНИЯ --- 
+async def daily_database_update():
+    """Запускает обновление базы данных ежедневно в 3:00 ночи.
+       Отправляет отчет администратору.
+    """
+    logging.info("daily_database_update: Задача запущена.")
+    while True:
+        try:
+            now = datetime.now()
+            # Определяем время следующего запуска (3:00)
+            target_time_today = now.replace(hour=3, minute=0, second=0, microsecond=0)
+            if now >= target_time_today:
+                # Если 3 часа сегодня уже прошло, планируем на завтра
+                target_time = target_time_today + timedelta(days=1)
+            else:
+                # Иначе планируем на сегодня
+                target_time = target_time_today
+            
+            sleep_duration = (target_time - now).total_seconds()
+            logging.info(f"daily_database_update: Следующее обновление запланировано на {target_time.strftime('%Y-%m-%d %H:%M:%S')}. Ожидание {sleep_duration:.0f} секунд...")
+            
+            await asyncio.sleep(sleep_duration)
+            
+            # ---- Время обновления ----
+            logging.info("daily_database_update: Время обновления! Запуск update_vector_store()...")
+            update_result = await update_vector_store() # Вызываем без chat_id
+            logging.info("daily_database_update: update_vector_store() завершено. Отправка отчета...")
+            await notify_admin_of_update_result(update_result)
+            # ---- Обновление и отчет завершены ----
+            
+            # Небольшая пауза, чтобы гарантированно перейти к следующему дню
+            await asyncio.sleep(60) 
+            
+        except asyncio.CancelledError:
+             logging.info("daily_database_update: Задача ежедневного обновления отменена.")
+             break # Выходим из цикла while
+        except Exception as e:
+            logging.error(f"daily_database_update: Ошибка в цикле ежедневного обновления: {str(e)}", exc_info=True)
+            # В случае ошибки ждем час перед следующей попыткой
+            logging.info("daily_database_update: Ожидание 1 час перед следующей попыткой...")
+            await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
