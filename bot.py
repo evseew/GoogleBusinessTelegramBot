@@ -444,6 +444,17 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
                 logging.info(f"ПРОВЕРКА: chroma.sqlite3 УЖЕ СУЩЕСТВУЕТ в {persist_directory} после makedirs (до PersistentClient). Права: {oct(os.stat(sqlite_file_path).st_mode)[-4:]}")
             else:
                 logging.info(f"ПРОВЕРКА: chroma.sqlite3 НЕ существует в {persist_directory} после makedirs (это ожидаемо).")
+            
+            # ---> НАЧАЛО: Дополнительное логирование содержимого директории <---
+            try:
+                dir_contents = os.listdir(persist_directory)
+                logging.info(f"ПРОВЕРКА СОДЕРЖИМОГО: Файлы в '{persist_directory}' после makedirs: {dir_contents}")
+                if not dir_contents:
+                    logging.info(f"ПРОВЕРКА СОДЕРЖИМОГО: Директория '{persist_directory}' пуста (это хорошо).")
+            except Exception as e_listdir:
+                logging.error(f"ПРОВЕРКА СОДЕРЖИМОГО: Не удалось прочитать содержимое '{persist_directory}': {e_listdir}")
+            # ---> КОНЕЦ: Дополнительное логирование содержимого директории <---
+            time.sleep(1.0) # <--- УВЕЛИЧЕНА ПАУЗА ДО 1 СЕКУНДЫ ---
             # ---> КОНЕЦ: Проверка после makedirs <---
         except Exception as e_mkdir:
             logging.error(f"НЕ УДАЛОСЬ создать/проверить директорию '{persist_directory}': {str(e_mkdir)}. Обновление прервано.", exc_info=True)
@@ -508,6 +519,20 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
             model_name = "text-embedding-3-large"
             embed_dim = 1536
             
+            # ---> НАЧАЛО: Проверка прав на запись <---
+            logging.info(f"Проверка прав на запись в директорию: {persist_directory}")
+            try:
+                # Попытка создать временный файл для проверки записи
+                test_file_path = os.path.join(persist_directory, "write_test.tmp")
+                with open(test_file_path, "w") as f:
+                    f.write("test")
+                os.remove(test_file_path)
+                logging.info(f"ПРОВЕРКА ПРАВ: Директория '{persist_directory}' доступна для записи.")
+            except Exception as e_write_test:
+                logging.error(f"ОШИБКА ПРАВ: Директория '{persist_directory}' НЕ доступна для записи: {e_write_test}", exc_info=True)
+                return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Directory not writable: {persist_directory}. Error: {e_write_test}"}
+            # ---> КОНЕЦ: Проверка прав на запись <---
+
             logging.info(f"Инициализация ChromaDB клиента в '{persist_directory}'...")
             # os.makedirs(persist_directory, mode=0o777, exist_ok=True) # <--- УДАЛЕНО ОТСЮДА, перенесено выше
             
@@ -519,21 +544,22 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
             else:
                 logging.error(f"ОШИБКА ПРОВЕРКИ: chroma.sqlite3 НЕ СУЩЕСТВУЕТ в {persist_directory} после PersistentClient!")
             # ---> КОНЕЦ: Проверка после PersistentClient <---
-            time.sleep(0.5) # <--- ДОБАВЛЕНА НЕБОЛЬШАЯ ПАУЗА
+            time.sleep(1.0) # <--- УВЕЛИЧЕНА ПАУЗА ДО 1 СЕКУНДЫ ---
             
             try:
-                # ---> НАЧАЛО: Явное удаление и создание коллекции <---
-                try:
-                    logging.info(f"Попытка удалить коллекцию '{collection_name}', если она существует...")
-                    chroma_client.delete_collection(name=collection_name)
-                    logging.info(f"Старая коллекция '{collection_name}' удалена (или не существовала).")
-                except Exception as e_del_coll:
-                    # Ошибки здесь не критичны, возможно коллекции и не было
-                    logging.warning(f"Не удалось удалить коллекцию '{collection_name}' (возможно, ее и не было): {e_del_coll}")
+                # ---> НАЧАЛО: Упрощенное создание коллекции <---
+                # Старый код (ЗАКОММЕНТИРОВАН):
+                # try:
+                #     logging.info(f"Попытка удалить коллекцию '{collection_name}', если она существует...")
+                #     chroma_client.delete_collection(name=collection_name)
+                #     logging.info(f"Старая коллекция '{collection_name}' удалена (или не существовала).")
+                # except Exception as e_del_coll:
+                #     logging.warning(f"Не удалось удалить коллекцию '{collection_name}' (возможно, ее и не было): {e_del_coll}")
                 
+                logging.info(f"Попытка создать коллекцию '{collection_name}' (ожидается, что ее нет)...")
                 collection = chroma_client.create_collection(name=collection_name)
-                logging.info(f"ЯВНО СОЗДАНА коллекция '{collection_name}'")
-                # ---> КОНЕЦ: Явное удаление и создание коллекции <---
+                logging.info(f"Коллекция '{collection_name}' успешно создана.")
+                # ---> КОНЕЦ: Упрощенное создание коллекции <---
 
                 # ---> НАЧАЛО: Проверка начального количества чанков <---
                 try:
@@ -543,9 +569,17 @@ async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
                     logging.error(f"Ошибка при получении начального количества чанков: {e_initial_count}", exc_info=True)
                 # ---> КОНЕЦ: Проверка начального количества чанков <---
 
+            except chromadb.errors.DuplicateCollectionError: # Перехватываем конкретную ошибку, если вдруг rmtree не сработал
+                logging.warning(f"КОНФЛИКТ: Коллекция '{collection_name}' уже существует несмотря на rmtree! Попытка получить ее.")
+                try:
+                    collection = chroma_client.get_collection(name=collection_name)
+                    logging.info(f"КОНФЛИКТ: Существующая коллекция '{collection_name}' получена.")
+                except Exception as e_get_coll_conflict:
+                    logging.error(f"КОНФЛИКТ: Не удалось получить существующую коллекцию '{collection_name}': {e_get_coll_conflict}", exc_info=True)
+                    return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Conflict: Collection already exists and could not be retrieved: {str(e_get_coll_conflict)}"}
             except Exception as e_coll:
-                 logging.error(f"Ошибка ЯВНОГО СОЗДАНИЯ коллекции '{collection_name}': {e_coll}", exc_info=True) # Добавил уточнение
-                 return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Collection creation/deletion error: {str(e_coll)}"}
+                 logging.error(f"Ошибка при создании/получении коллекции '{collection_name}': {e_coll}", exc_info=True)
+                 return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Collection creation/access error: {str(e_coll)}"}
             
             batch_size = 100
             total_added = 0
