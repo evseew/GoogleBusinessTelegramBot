@@ -501,6 +501,15 @@ async def update_vector_store():
             try:
                 collection = chroma_client.get_or_create_collection(name=collection_name)
                 logging.info(f"Используется или создана коллекция '{collection_name}'")
+
+                # ---> НАЧАЛО: Проверка начального количества чанков <---
+                try:
+                    initial_count = collection.count()
+                    logging.info(f"НАЧАЛЬНОЕ количество чанков в коллекции '{collection_name}': {initial_count}")
+                except Exception as e_initial_count:
+                    logging.error(f"Ошибка при получении начального количества чанков: {e_initial_count}", exc_info=True)
+                # ---> КОНЕЦ: Проверка начального количества чанков <---
+
             except Exception as e_coll:
                  logging.error(f"Ошибка получения/создания коллекции '{collection_name}': {e_coll}", exc_info=True) # Добавил exc_info
                  return {'success': False, 'added_chunks': 0, 'total_chunks': _get_current_chunk_count_or_na(), 'error': f"Collection error: {str(e_coll)}"}
