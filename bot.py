@@ -1451,29 +1451,56 @@ async def log_context(user_id, query, context):
 # --- НОВАЯ/ВОССТАНОВЛЕННАЯ ФУНКЦИЯ ---
 async def chat_with_assistant(user_id: int, user_input: str) -> str:
     """
-    Отправляет запрос ассистенту OpenAI и возвращает его ответ.
+    Отправляет запрос ассистенту OpenAI и возвращает его ответ,
+    предварительно попытавшись найти и добавить контекст из локальной базы знаний.
     """
     log_prefix = f"chat_with_assistant(user:{user_id}):"
     logging.info(f"{log_prefix} Начало обработки запроса: {user_input[:100]}...")
     
+    final_input_to_openai = user_input # По умолчанию отправляем оригинальный запрос
+
+    # --- НАЧАЛО: Получение контекста из локальной базы ---
+    if USE_VECTOR_STORE: 
+        logging.debug(f"{log_prefix} Попытка получить локальный контекст для запроса (k=5)...")
+        try:
+            # Изменяем k на 5
+            local_context = await get_relevant_context(user_input, k=5)
+            if local_context:
+                logging.info(f"{log_prefix} Найден локальный контекст (k=5): {local_context[:200]}...")
+                # Изменяем формулировку инструкции
+                final_input_to_openai = (
+                    f"Отвечай ТОЛЬКО на основе этого контекста из базы знаний:\n"
+                    f"--- НАЧАЛО КОНТЕКСТА ---\n{local_context}\n--- КОНЕЦ КОНТЕКСТА ---\n\n"
+                    f"Вопрос пользователя:\n{user_input}"
+                )
+                logging.debug(f"{log_prefix} Сформирован расширенный запрос для OpenAI (начало): {final_input_to_openai[:150]}... (контекст добавлен)")
+                await log_context(user_id, user_input, local_context)
+            else:
+                logging.info(f"{log_prefix} Локальный контекст не найден (k=5). Используется оригинальный запрос.")
+                await log_context(user_id, user_input, "ЛОКАЛЬНЫЙ КОНТЕКСТ НЕ НАЙДЕН (k=5)")
+        except Exception as e_context:
+            logging.error(f"{log_prefix} Ошибка при получении локального контекста (k=5): {e_context}. Используется оригинальный запрос.")
+            await log_context(user_id, user_input, f"ОШИБКА ПОЛУЧЕНИЯ КОНТЕКСТА (k=5): {e_context}")
+    else:
+        logging.debug(f"{log_prefix} Использование векторной базы отключено (USE_VECTOR_STORE=False). Используется оригинальный запрос.")
+    # --- КОНЕЦ: Получение контекста ---
+
     try:
         await add_message_to_history(user_id, "user", user_input)
 
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        thread_id = await get_or_create_thread(user_id) # get_or_create_thread остается async
+        thread_id = await get_or_create_thread(user_id) 
         logging.debug(f"{log_prefix} Используется тред ID: {thread_id}")
 
-        logging.debug(f"{log_prefix} Добавление сообщения пользователя в тред OpenAI...")
-        # Убираем await
+        logging.debug(f"{log_prefix} Добавление СООБЩЕНИЯ (возможно, расширенного) в тред OpenAI...")
         client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
-            content=user_input
+            content=final_input_to_openai
         )
-        logging.debug(f"{log_prefix} Сообщение пользователя добавлено в тред OpenAI.")
+        logging.debug(f"{log_prefix} Сообщение добавлено в тред OpenAI.")
 
         logging.debug(f"{log_prefix} Запуск выполнения треда с ASSISTANT_ID: {ASSISTANT_ID}...")
-        # Убираем await
         run = client.beta.threads.runs.create(
             thread_id=thread_id,
             assistant_id=ASSISTANT_ID
@@ -1482,25 +1509,21 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
 
         start_time = time.time()
         timeout_seconds = 90
-
         while run.status in ["queued", "in_progress", "cancelling"]:
-            await asyncio.sleep(1.5) # asyncio.sleep остается async
-            # Убираем await
-            run = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-            logging.debug(f"{log_prefix} Статус выполнения: {run.status}")
-            if time.time() - start_time > timeout_seconds:
-                logging.error(f"{log_prefix} Таймаут ожидания ответа от ассистента (run_id: {run.id}).")
-                try:
-                    # Убираем await
-                    client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run.id)
-                    logging.info(f"{log_prefix} Попытка отмены выполнения {run.id} отправлена.")
-                except Exception as e_cancel:
-                    logging.error(f"{log_prefix} Ошибка при попытке отмены выполнения {run.id}: {e_cancel}")
-                return "Извините, ассистент долго не отвечает. Пожалуйста, попробуйте позже."
+             await asyncio.sleep(1.5) 
+             run = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+             logging.debug(f"{log_prefix} Статус выполнения: {run.status}")
+             if time.time() - start_time > timeout_seconds:
+                 logging.error(f"{log_prefix} Таймаут ожидания ответа от ассистента (run_id: {run.id}).")
+                 try:
+                     client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run.id)
+                     logging.info(f"{log_prefix} Попытка отмены выполнения {run.id} отправлена.")
+                 except Exception as e_cancel:
+                     logging.error(f"{log_prefix} Ошибка при попытке отмены выполнения {run.id}: {e_cancel}")
+                 return "Извините, ассистент долго не отвечает. Пожалуйста, попробуйте позже."
 
         if run.status == "completed":
             logging.debug(f"{log_prefix} Выполнение завершено успешно.")
-            # Убираем await
             messages_response = client.beta.threads.messages.list(thread_id=thread_id, order="desc", limit=5)
             
             assistant_messages = [msg for msg in messages_response.data if msg.role == "assistant"]
