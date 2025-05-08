@@ -1448,7 +1448,6 @@ async def log_context(user_id, query, context):
     except Exception as e:
         logging.error(f"Ошибка логирования контекста для user_id {user_id}: {str(e)}")
 
-
 # --- НОВАЯ/ВОССТАНОВЛЕННАЯ ФУНКЦИЯ ---
 async def chat_with_assistant(user_id: int, user_input: str) -> str:
     """
@@ -1458,15 +1457,15 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
     logging.info(f"{log_prefix} Начало обработки запроса: {user_input[:100]}...")
     
     try:
-        # Добавляем сообщение пользователя в нашу локальную историю
         await add_message_to_history(user_id, "user", user_input)
 
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        thread_id = await get_or_create_thread(user_id)
+        thread_id = await get_or_create_thread(user_id) # get_or_create_thread остается async
         logging.debug(f"{log_prefix} Используется тред ID: {thread_id}")
 
         logging.debug(f"{log_prefix} Добавление сообщения пользователя в тред OpenAI...")
-        await client.beta.threads.messages.create(
+        # Убираем await
+        client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
             content=user_input
@@ -1474,23 +1473,26 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
         logging.debug(f"{log_prefix} Сообщение пользователя добавлено в тред OpenAI.")
 
         logging.debug(f"{log_prefix} Запуск выполнения треда с ASSISTANT_ID: {ASSISTANT_ID}...")
-        run = await client.beta.threads.runs.create(
+        # Убираем await
+        run = client.beta.threads.runs.create(
             thread_id=thread_id,
             assistant_id=ASSISTANT_ID
         )
         logging.debug(f"{log_prefix} Тред запущен, ID выполнения: {run.id}")
 
         start_time = time.time()
-        timeout_seconds = 90  # Увеличим таймаут
+        timeout_seconds = 90
 
         while run.status in ["queued", "in_progress", "cancelling"]:
-            await asyncio.sleep(1.5) 
-            run = await client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+            await asyncio.sleep(1.5) # asyncio.sleep остается async
+            # Убираем await
+            run = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
             logging.debug(f"{log_prefix} Статус выполнения: {run.status}")
             if time.time() - start_time > timeout_seconds:
                 logging.error(f"{log_prefix} Таймаут ожидания ответа от ассистента (run_id: {run.id}).")
                 try:
-                    await client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run.id)
+                    # Убираем await
+                    client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run.id)
                     logging.info(f"{log_prefix} Попытка отмены выполнения {run.id} отправлена.")
                 except Exception as e_cancel:
                     logging.error(f"{log_prefix} Ошибка при попытке отмены выполнения {run.id}: {e_cancel}")
@@ -1498,7 +1500,8 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
 
         if run.status == "completed":
             logging.debug(f"{log_prefix} Выполнение завершено успешно.")
-            messages_response = await client.beta.threads.messages.list(thread_id=thread_id, order="desc", limit=5)
+            # Убираем await
+            messages_response = client.beta.threads.messages.list(thread_id=thread_id, order="desc", limit=5)
             
             assistant_messages = [msg for msg in messages_response.data if msg.role == "assistant"]
 
@@ -1514,7 +1517,7 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
                          logging.warning(f"{log_prefix} Ассистент ответил, но текст после обработки пустой.")
                          return "Ассистент дал пустой ответ. Попробуйте переформулировать запрос."
                     logging.info(f"{log_prefix} Получен ответ от ассистента: {final_response[:200]}...")
-                    await add_message_to_history(user_id, "assistant", final_response)
+                    await add_message_to_history(user_id, "assistant", final_response) # add_message_to_history остается async
                     return final_response
                 else:
                     logging.warning(f"{log_prefix} Ассистент ответил, но текстовое содержимое (text parts) пустое.")
@@ -1650,110 +1653,6 @@ def signal_handler(sig, frame):
     # Остановка должна произойти в finally блока main
     logging.info(f"Сигнал {signame} обработан. Завершение...")
     # Не вызываем sys.exit(), чтобы finally в main мог выполниться
-
-# --- НОВАЯ ВОССОЗДАННАЯ ФУНКЦИЯ ---
-async def chat_with_assistant(user_id: int, user_input: str) -> str:
-    """
-    Отправляет запрос ассистенту OpenAI и возвращает его ответ.
-    Эта функция была воссоздана, так как оригинальное определение было утеряно.
-    """
-    log_prefix = f"chat_with_assistant(user:{user_id}):"
-    logging.info(f"{log_prefix} Начало обработки запроса: {user_input[:100]}...")
-    
-    try:
-        # Добавляем сообщение пользователя в нашу локальную историю
-        await add_message_to_history(user_id, "user", user_input)
-
-        client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        thread_id = await get_or_create_thread(user_id)
-        logging.debug(f"{log_prefix} Используется тред ID: {thread_id}")
-
-        logging.debug(f"{log_prefix} Добавление сообщения пользователя в тред OpenAI...")
-        await client.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=user_input
-        )
-        logging.debug(f"{log_prefix} Сообщение пользователя добавлено в тред OpenAI.")
-
-        logging.debug(f"{log_prefix} Запуск выполнения треда с ASSISTANT_ID: {ASSISTANT_ID}...")
-        run = await client.beta.threads.runs.create(
-            thread_id=thread_id,
-            assistant_id=ASSISTANT_ID
-        )
-        logging.debug(f"{log_prefix} Тред запущен, ID выполнения: {run.id}")
-
-        start_time = time.time()
-        timeout_seconds = 90  # Увеличим таймаут
-
-        while run.status in ["queued", "in_progress", "cancelling"]:
-            await asyncio.sleep(1.5) 
-            run = await client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-            logging.debug(f"{log_prefix} Статус выполнения: {run.status}")
-            if time.time() - start_time > timeout_seconds:
-                logging.error(f"{log_prefix} Таймаут ожидания ответа от ассистента (run_id: {run.id}).")
-                try:
-                    await client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run.id)
-                    logging.info(f"{log_prefix} Попытка отмены выполнения {run.id} отправлена.")
-                except Exception as e_cancel:
-                    logging.error(f"{log_prefix} Ошибка при попытке отмены выполнения {run.id}: {e_cancel}")
-                return "Извините, ассистент долго не отвечает. Пожалуйста, попробуйте позже."
-
-        if run.status == "completed":
-            logging.debug(f"{log_prefix} Выполнение завершено успешно.")
-            messages_response = await client.beta.threads.messages.list(thread_id=thread_id, order="desc", limit=5)
-            
-            assistant_messages = [msg for msg in messages_response.data if msg.role == "assistant"]
-
-            if assistant_messages and assistant_messages[0].content:
-                response_text_parts = []
-                for content_block in assistant_messages[0].content:
-                    if content_block.type == "text":
-                        response_text_parts.append(content_block.text.value)
-                
-                if response_text_parts:
-                    final_response = "\\n".join(response_text_parts).strip()
-                    if not final_response:
-                         logging.warning(f"{log_prefix} Ассистент ответил, но текст после обработки пустой.")
-                         return "Ассистент дал пустой ответ. Попробуйте переформулировать запрос."
-                    logging.info(f"{log_prefix} Получен ответ от ассистента: {final_response[:200]}...")
-                    await add_message_to_history(user_id, "assistant", final_response)
-                    return final_response
-                else:
-                    logging.warning(f"{log_prefix} Ассистент ответил, но текстовое содержимое (text parts) пустое.")
-                    return "Ассистент дал пустой ответ. Попробуйте переформулировать запрос."
-            else:
-                logging.warning(f"{log_prefix} Выполнение завершено, но сообщения от ассистента не найдены или их контент пуст.")
-                return "Не удалось получить ответ от ассистента после выполнения."
-        
-        elif run.status == "requires_action":
-            logging.warning(f"{log_prefix} Выполнение требует действий (например, Function Calling), что не обрабатывается: run_id {run.id}")
-            return "Ассистент запросил дополнительные действия, которые пока не поддерживаются. Пожалуйста, упростите запрос."
-
-        elif run.status == "failed":
-            logging.error(f"{log_prefix} Выполнение треда завершилось с ошибкой: {run.last_error}. Run ID: {run.id}")
-            error_message = f"Код: {run.last_error.code}. Сообщение: {run.last_error.message}" if run.last_error else "Неизвестная ошибка выполнения OpenAI."
-            return f"Извините, произошла ошибка при обработке вашего запроса на стороне OpenAI. ({error_message})"
-        
-        else: 
-            logging.warning(f"{log_prefix} Выполнение треда завершилось со статусом: {run.status}. Run ID: {run.id}")
-            return f"Обработка вашего запроса была прервана или завершилась с неожиданным статусом ({run.status}). Пожалуйста, попробуйте снова."
-
-    except openai.APIConnectionError as e:
-        logging.error(f"{log_prefix} Ошибка соединения с OpenAI API: {e}", exc_info=True)
-        return "Не удалось подключиться к OpenAI. Проверьте ваше интернет-соединение или статус OpenAI."
-    except openai.RateLimitError as e:
-        logging.error(f"{log_prefix} Превышен лимит запросов к OpenAI API: {e}", exc_info=True)
-        return "Слишком много запросов к OpenAI. Пожалуйста, подождите некоторое время."
-    except openai.AuthenticationError as e:
-        logging.error(f"{log_prefix} Ошибка аутентификации OpenAI API: {e}. Проверьте ваш API ключ.", exc_info=True)
-        return "Ошибка аутентификации с OpenAI. Обратитесь к администратору."
-    except openai.APIError as e: 
-        logging.error(f"{log_prefix} Общая ошибка OpenAI API: {e}", exc_info=True)
-        return f"Произошла ошибка при обращении к OpenAI: {e}. Пожалуйста, попробуйте позже."
-    except Exception as e:
-        logging.error(f"{log_prefix} Непредвиденная ошибка в chat_with_assistant: {e}", exc_info=True)
-        return "Произошла внутренняя ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже."
 
 
 if __name__ == "__main__":
