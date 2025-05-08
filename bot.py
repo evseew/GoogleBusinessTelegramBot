@@ -496,6 +496,7 @@ async def update_vector_store():
             
             chroma_client = chromadb.PersistentClient(path=persist_directory)
             logging.info(f"ChromaDB клиент инициализирован.")
+            time.sleep(0.5) # <--- ДОБАВЛЕНА НЕБОЛЬШАЯ ПАУЗА
             
             try:
                 collection = chroma_client.get_or_create_collection(name=collection_name)
