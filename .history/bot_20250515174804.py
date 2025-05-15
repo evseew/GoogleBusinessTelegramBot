@@ -767,8 +767,8 @@ async def update_vector_store_telegram(chat_id_to_notify: Optional[int] = None) 
             return {"success": False, "error": "temp_vector_collection is None", "added_chunks": 0, "total_chunks": 0}
 
         active_db_info_filepath = os.path.join(VECTOR_DB_BASE_PATH, ACTIVE_DB_INFO_FILE)
-        with open(active_db_info_filepath, "w", encoding="utf-8") as f: f.write(new_db_subpath) # <--- ИЗМЕНЕНО: сохраняем только имя поддиректории
-        logger.info(f"Подпуть к новой активной базе (TG) '{new_db_subpath}' сохранен в '{active_db_info_filepath}'. Активная директория БД: '{new_db_full_path}'") # <--- ИЗМЕНЕНО: сообщение в логе
+        with open(active_db_info_filepath, "w", encoding="utf-8") as f: f.write(new_db_full_path) # Сохраняем ПОЛНЫЙ путь
+        logger.info(f"Полный путь к новой активной базе (TG) '{new_db_full_path}' сохранен в '{active_db_info_filepath}'.")
 
         await _initialize_active_vector_collection_telegram()
         if not vector_collection:
