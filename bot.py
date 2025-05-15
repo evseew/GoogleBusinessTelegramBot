@@ -1,1776 +1,1136 @@
 import sys
 import os
-import time
-import aiohttp
-import re
-import glob
+import time # используется time.time()
 import asyncio
-from collections import deque
-import datetime
-import subprocess
-import signal
+import logging
+import datetime # используется datetime.datetime, datetime.timedelta
+import glob
+import io
+from io import BytesIO
+import json
+import re
+import signal # Для корректного завершения
 import shutil
 from asyncio import Lock
+from collections import defaultdict # Для user_processing_locks
+from typing import Optional, List, Dict, Any
 
-# Отладочная информация
-print(f"Python: {sys.version}")
-print(f"Python path: {sys.executable}")
-print(f"Virtual env: {os.environ.get('VIRTUAL_ENV', 'Not in a virtual environment')}")
-print(f"Working directory: {os.getcwd()}")
-
-# Проверка наличия библиотеки
-print("Используем OpenAI Embeddings вместо sentence-transformers")
-
+# --- Dependency Imports ---
 import openai
-import logging
-from aiogram import Bot, Dispatcher, Router, types as aiogram_types, F
-from aiogram.filters import Command, Filter
+import chromadb
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from io import BytesIO
 import docx
 import PyPDF2
-import io
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
-from langchain.text_splitter import MarkdownHeaderTextSplitter
 
-# Загружаем переменные из .env
+from aiogram import Bot, Dispatcher, Router, types as aiogram_types, F
+from aiogram.filters import Command
+from aiogram.enums import ChatAction # Для статуса "печатает"
+
+# LangChain components
+from langchain_openai import OpenAIEmbeddings # Не используется напрямую, но может понадобиться если OpenAI API клиент не будет использоваться для эмбеддингов
+from langchain.text_splitter import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+from langchain_core.documents import Document # Langchain Document
+
+# --- Load Environment Variables ---
 load_dotenv()
+
+# --- Configuration ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID = os.getenv("ASSISTANT_ID")
+SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", 'service-account-key.json')
+FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 
-# Добавляем константу для пути к ключу сервисного аккаунта
-SERVICE_ACCOUNT_FILE = 'service-account-key.json'
-FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")  # ID папки с документами
+try:
+    ADMIN_USER_ID_STR = os.getenv("ADMIN_USER_ID")
+    if not ADMIN_USER_ID_STR:
+        raise ValueError("ADMIN_USER_ID не найден в .env")
+    ADMIN_USER_ID = int(ADMIN_USER_ID_STR)
+except (ValueError, TypeError) as e:
+    logging.critical(f"КРИТИЧЕСКАЯ ОШИБКА: Некорректное значение ADMIN_USER_ID в .env: {e}")
+    sys.exit(1)
 
-# Добавим константу с ID администратора бота
-ADMIN_USER_ID = 164266775  # Замените на ваш ID пользователя
-# Добавим список ID менеджеров
-MANAGER_USER_IDS = [7924983011]
+try:
+    manager_ids_str = os.getenv("MANAGER_USER_IDS", "")
+    MANAGER_USER_IDS = [int(id_str.strip()) for id_str in manager_ids_str.split(',') if id_str.strip()]
+except (ValueError, TypeError) as e:
+    logging.critical(f"КРИТИЧЕСКАЯ ОШИБКА: Некорректные значения MANAGER_USER_IDS в .env: {e}")
+    sys.exit(1)
 
-# Проверяем, загрузились ли переменные
-if not all([TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, ASSISTANT_ID, FOLDER_ID]):
-     # Добавляем FOLDER_ID в проверку
-     logging.critical("КРИТИЧЕСКАЯ ОШИБКА: Отсутствуют одна или несколько переменных окружения (TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, ASSISTANT_ID, GOOGLE_DRIVE_FOLDER_ID). Проверьте .env файл.")
-     # Завершаем работу, если критические переменные отсутствуют
-     sys.exit("Критические переменные окружения не установлены.")
+MESSAGE_BUFFER_SECONDS = int(os.getenv("MESSAGE_BUFFER_SECONDS", "4"))
+LOGS_DIR = os.getenv("LOGS_DIR", "./logs/context_logs_telegram")
+SILENCE_STATE_FILE = os.getenv("TELEGRAM_SILENCE_STATE_FILE", "telegram_silence_state.json")
 
-# Настройка логирования
+VECTOR_DB_BASE_PATH = os.getenv("VECTOR_DB_BASE_PATH_TELEGRAM", "./local_vector_db_telegram")
+ACTIVE_DB_INFO_FILE = os.getenv("ACTIVE_DB_INFO_FILE_TELEGRAM", "active_db_path_telegram.txt")
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
+try:
+    _dim_str = os.getenv("OPENAI_EMBEDDING_DIMENSIONS")
+    OPENAI_EMBEDDING_DIMENSIONS = int(_dim_str) if _dim_str and _dim_str.lower() != 'none' else None
+except ValueError:
+    logging.warning(f"Некорректное значение OPENAI_EMBEDDING_DIMENSIONS ('{_dim_str}'), используется None.")
+    OPENAI_EMBEDDING_DIMENSIONS = None
+
+CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME_TELEGRAM", "documents_telegram")
+RELEVANT_CONTEXT_COUNT = int(os.getenv("RELEVANT_CONTEXT_COUNT", "3"))
+OPENAI_RUN_TIMEOUT_SECONDS = int(os.getenv("OPENAI_RUN_TIMEOUT_SECONDS", "90"))
+LOG_RETENTION_SECONDS = int(os.getenv("LOG_RETENTION_SECONDS_TELEGRAM", "86400")) # 24 часа
+USE_VECTOR_STORE_STR = os.getenv("USE_VECTOR_STORE_TELEGRAM", "True")
+USE_VECTOR_STORE = USE_VECTOR_STORE_STR.lower() == 'true'
+
+MESSAGE_LIFETIME_DAYS = int(os.getenv("MESSAGE_LIFETIME_DAYS", "100")) 
+MESSAGE_LIFETIME = datetime.timedelta(days=MESSAGE_LIFETIME_DAYS)
+
+
+# --- Validate Configuration ---
+required_vars = {
+    "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
+    "OPENAI_API_KEY": OPENAI_API_KEY,
+    "ASSISTANT_ID": ASSISTANT_ID,
+    "FOLDER_ID": FOLDER_ID,
+    "ADMIN_USER_ID": ADMIN_USER_ID
+}
+missing_vars_list = [name for name, value in required_vars.items() if not value and value != 0]
+if missing_vars_list:
+    logging.critical(f"КРИТИЧЕСКАЯ ОШИБКА: Отсутствуют переменные окружения: {', '.join(missing_vars_list)}. Проверьте .env файл.")
+    sys.exit(1)
+
+# --- Setup Logging ---
+os.makedirs(LOGS_DIR, exist_ok=True)
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(name)s - %(funcName)s - %(message)s'
+    level=logging.INFO, # Установите DEBUG для более подробного логирования
+    format='%(asctime)s - %(levelname)s - %(name)s - %(funcName)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
+logger = logging.getLogger(__name__)
 
-# Создаем объекты бота, диспетчера и роутера
+# --- Initialize API Clients ---
+try:
+    openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+    logger.info("Клиент OpenAI Async инициализирован.")
+except Exception as e:
+    logger.critical(f"Не удалось инициализировать клиент OpenAI: {e}", exc_info=True)
+    sys.exit(1)
+
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# Хранение `thread_id` и истории сообщений пользователей
-user_threads = {}
-user_messages = {}
-MESSAGE_LIFETIME = timedelta(days=100)
+# --- Global State (In-Memory) ---
+user_threads: Dict[int, str] = {} 
+user_messages: Dict[int, List[Dict[str, Any]]] = {} 
 
-# --- Убираем неиспользуемые кэши --- 
-# response_cache = {}
-# drive_cache = {}
+pending_messages: Dict[int, List[str]] = {}  
+user_message_timers: Dict[int, asyncio.Task] = {}  
+user_processing_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-# Включаем векторную базу
-USE_VECTOR_STORE = True
-# Создаем директорию для логов
-LOGS_DIR = "./logs/context_logs"
-os.makedirs(LOGS_DIR, exist_ok=True)
+chat_silence_state: Dict[int, bool] = {} 
 
-# --- ЛОГИКА БУФЕРИЗАЦИИ (Корректная версия) ---
-MESSAGE_BUFFER_SECONDS = 4  # Время ожидания перед отправкой объединенного сообщения
-pending_messages: dict[int, list[str]] = {}  # Хранилище буферизированных сообщений {user_id: [text1, text2]}
-user_message_timers: dict[int, asyncio.Task] = {}  # Хранилище таймеров для каждого пользователя {user_id: task}
-user_processing_locks: dict[int, asyncio.Lock] = {} # Блокировки для обработки сообщений одного пользователя {user_id: Lock}
-# ------------------------------------
+# --- Vector Store (ChromaDB) ---
+vector_collection: Optional[chromadb.api.models.Collection.Collection] = None
 
-# --- РЕЖИМ МОЛЧАНИЯ ДЛЯ ЧАТОВ ---
-chat_silence_state = {} # Ключ: chat_id, Значение: True (молчание), False (активен)
-chat_silence_timers = {} # Ключ: chat_id, Значение: Task для отсчета времени деактивации молчания
-MANAGER_ACTIVE_TIMEOUT = 86400  # 24 часа
-# ------------------------------------
+def _get_active_db_full_path_telegram() -> Optional[str]: # Renamed from _get_active_db_subpath_telegram
+    try:
+        active_db_info_filepath = os.path.join(VECTOR_DB_BASE_PATH, ACTIVE_DB_INFO_FILE)
+        if os.path.exists(active_db_info_filepath):
+            with open(active_db_info_filepath, "r", encoding="utf-8") as f:
+                active_subdir_or_fullname = f.read().strip() 
+            
+            if not active_subdir_or_fullname:
+                logger.warning(f"Файл '{ACTIVE_DB_INFO_FILE}' (TG) пуст.")
+                return None
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (get_or_create_thread, cleanup_old_messages, add_message_to_history) ---
+            # Проверяем, является ли сохраненное значение полным путем или относительным
+            # Это для обратной совместимости, если раньше сохранялся относительный путь
+            potential_full_path = active_subdir_or_fullname
+            if not os.path.isabs(potential_full_path): # Если это не абсолютный путь
+                 potential_full_path = os.path.join(VECTOR_DB_BASE_PATH, active_subdir_or_fullname)
+            
+            if os.path.isdir(potential_full_path): 
+                logger.info(f"Найдена активная директория БД (TG): '{potential_full_path}'")
+                return potential_full_path
+            else: 
+                logger.warning(f"В файле '{ACTIVE_DB_INFO_FILE}' (TG) указан путь '{active_subdir_or_fullname}', но директория '{potential_full_path}' не существует.")
+                return None
+        else: 
+            logger.info(f"Файл информации об активной БД '{ACTIVE_DB_INFO_FILE}' (TG) не найден.")
+            return None
+    except Exception as e:
+        logger.error(f"Ошибка при чтении файла информации об активной БД (TG): {e}", exc_info=True)
+        return None
 
-async def get_or_create_thread(user_id):
-    """Получает или создает новый thread_id для пользователя."""
-    if user_id in user_threads:
-        thread_id = user_threads[user_id]
+async def _initialize_active_vector_collection_telegram():
+    global vector_collection
+    active_db_full_path = _get_active_db_full_path_telegram()
+    if active_db_full_path:
         try:
-            client = openai.OpenAI(api_key=OPENAI_API_KEY)
-            client.beta.threads.messages.list(thread_id=thread_id)
-            return thread_id
+            def _init_chroma():
+                chroma_client_init = chromadb.PersistentClient(path=active_db_full_path)
+                return chroma_client_init.get_or_create_collection(
+                    name=CHROMA_COLLECTION_NAME,
+                )
+            vector_collection = await asyncio.to_thread(_init_chroma)
+            logger.info(f"Успешно подключено к ChromaDB (TG): '{active_db_full_path}'. Коллекция: '{CHROMA_COLLECTION_NAME}'.")
+            if vector_collection:
+                count = await asyncio.to_thread(vector_collection.count)
+                logger.info(f"Документов в активной коллекции (TG) при старте: {count}")
         except Exception as e:
-            logging.error(f"Ошибка доступа к треду {thread_id}: {str(e)}. Создаем новый.")
-            del user_threads[user_id]
-            if user_id in user_messages:
-                del user_messages[user_id]
+            logger.error(f"Ошибка инициализации ChromaDB (TG) для пути '{active_db_full_path}': {e}. Поиск по базе знаний будет недоступен.", exc_info=True)
+            vector_collection = None
+    else:
+        logger.warning("Не удалось определить активную директорию БД (TG). База знаний будет недоступна.")
+        vector_collection = None
 
-    client = openai.OpenAI(api_key=OPENAI_API_KEY)
-    thread = client.beta.threads.create()
-    thread_id = thread.id
-    user_threads[user_id] = thread_id
-    user_messages[user_id] = []
-    logging.info(f"Создан новый тред {thread_id} для пользователя {user_id}")
-    return thread_id
+# --- Google Drive ---
+drive_service_instance = None # Инициализируется в main
 
-async def cleanup_old_messages():
-    """Очищает старые сообщения по времени"""
-    current_time = datetime.now()
-    for user_id in list(user_messages.keys()): # Итерируем по копии ключей
-        user_messages[user_id] = [
-            msg for msg in user_messages[user_id]
-            if current_time - msg['timestamp'] < MESSAGE_LIFETIME
-        ]
-
-async def add_message_to_history(user_id, role, content):
-    """Добавляет сообщение в историю"""
-    if user_id not in user_messages:
-        user_messages[user_id] = []
-    user_messages[user_id].append({
-        'role': role,
-        'content': content,
-        'timestamp': datetime.now()
-    })
-
-# --- GOOGLE DRIVE FUNCTIONS ---
-# (get_drive_service, read_data_from_drive, download_google_doc, download_pdf, download_docx, download_text)
-# ... (Код этих функций с улучшениями обработки ошибок и логов)
-
-def get_drive_service():
-    """Получение сервиса Google Drive через сервисный аккаунт"""
+def get_drive_service_sync(): 
+    global drive_service_instance
+    if drive_service_instance:
+        return drive_service_instance
     try:
         credentials = service_account.Credentials.from_service_account_file(
             SERVICE_ACCOUNT_FILE,
             scopes=['https://www.googleapis.com/auth/drive.readonly']
         )
-        return build('drive', 'v3', credentials=credentials)
+        drive_service_instance = build('drive', 'v3', credentials=credentials)
+        logger.info("Сервис Google Drive инициализирован (синхронно).")
+        return drive_service_instance
+    except FileNotFoundError:
+        logger.error(f"Файл ключа Google Service Account не найден: {SERVICE_ACCOUNT_FILE}")
+        return None
     except Exception as e:
-        logging.error(f"Ошибка при получении сервиса Google Drive: {e}", exc_info=True)
-        raise
-
-def read_data_from_drive():
-    """Читает данные из Google Drive"""
-    logging.info("Загружаем данные из Google Drive...")
-    service = get_drive_service()
-    result = []
-    page_token = None
-    try:
-        while True:
-            response = service.files().list(
-                q=f"'{FOLDER_ID}' in parents and trashed=false",
-                spaces='drive',
-                fields='nextPageToken, files(id, name, mimeType)',
-                pageToken=page_token
-            ).execute()
-            files = response.get('files', [])
-            logging.info(f"Найдено {len(files)} файлов на этой странице.")
-
-            for file in files:
-                content = ""
-                file_id = file['id']
-                file_name = file['name']
-                mime_type = file['mimeType']
-                logging.debug(f"Обработка файла: {file_name} (ID: {file_id}, Type: {mime_type})")
-
-                try:
-                    if mime_type == 'application/vnd.google-apps.document':
-                        content = download_google_doc(service, file_id)
-                    elif mime_type == 'application/pdf':
-                        content = download_pdf(service, file_id)
-                    elif mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-                        content = download_docx(service, file_id)
-                    elif mime_type == 'text/plain':
-                        content = download_text(service, file_id)
-                    else:
-                         logging.warning(f"Пропуск файла '{file_name}' с неподдерживаемым типом: {mime_type}")
-                         continue
-
-                    if content:
-                        result.append({
-                            'name': file_name,
-                            'content': content
-                        })
-                        logging.debug(f"Успешно прочитан файл: {file_name}")
-                    else:
-                         logging.warning(f"Файл '{file_name}' прочитан, но не содержит текста.")
-
-                except Exception as e:
-                    logging.error(f"Ошибка при чтении файла {file_name} (ID: {file_id}): {str(e)}")
-                    continue
-
-            page_token = response.get('nextPageToken', None)
-            if page_token is None:
-                break
-
-    except Exception as e:
-        logging.error(f"Критическая ошибка при чтении из Google Drive: {str(e)}")
-
-    logging.info(f"Завершено чтение из Google Drive. Получено {len(result)} документов с текстом.")
-    return result
-
-def download_google_doc(service, file_id):
-    """Скачивает и читает содержимое Google Doc."""
-    try:
-        content_bytes = service.files().export(
-            fileId=file_id,
-            mimeType='text/plain'
-        ).execute()
-        return content_bytes.decode('utf-8')
-    except Exception as e:
-        logging.error(f"Ошибка скачивания Google Doc (ID: {file_id}): {str(e)}")
-        return ""
-
-def download_pdf(service, file_id):
-    """Скачивает и читает содержимое PDF файла."""
-    try:
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-            # logging.debug(f"Скачивание PDF (ID: {file_id}): {int(status.progress() * 100)}%") # Закомментировано
-
-        fh.seek(0)
-        pdf_reader = PyPDF2.PdfReader(fh)
-        text = ""
-        for page_num, page in enumerate(pdf_reader.pages):
-             try:
-                 page_text = page.extract_text()
-                 if page_text:
-                     text += page_text + "\n"
-                 # else:
-                 #     logging.warning(f"Не удалось извлечь текст со страницы {page_num+1} PDF (ID: {file_id})")
-             except Exception as page_err:
-                 logging.error(f"Ошибка извлечения текста со страницы {page_num+1} PDF (ID: {file_id}): {page_err}")
-        return text
-    except Exception as e:
-        logging.error(f"Ошибка скачивания/чтения PDF (ID: {file_id}): {str(e)}")
-        return ""
-
-def download_docx(service, file_id):
-    """Скачивает и читает содержимое DOCX файла."""
-    try:
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-            # logging.debug(f"Скачивание DOCX (ID: {file_id}): {int(status.progress() * 100)}%") # Закомментировано
-
-        fh.seek(0)
-        doc = docx.Document(fh)
-        return "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()])
-    except Exception as e:
-        logging.error(f"Ошибка скачивания/чтения DOCX (ID: {file_id}): {str(e)}")
-        return ""
-
-def download_text(service, file_id):
-    """Скачивает и читает содержимое текстового файла."""
-    try:
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-            # logging.debug(f"Скачивание TXT (ID: {file_id}): {int(status.progress() * 100)}%") # Закомментировано
-
-        fh.seek(0)
-        content_bytes = fh.getvalue()
-        try:
-            return content_bytes.decode('utf-8')
-        except UnicodeDecodeError:
-            logging.warning(f"Ошибка декодирования TXT (ID: {file_id}) как UTF-8, пробуем cp1251")
-            try:
-                 return content_bytes.decode('cp1251')
-            except Exception as decode_err:
-                 logging.error(f"Не удалось декодировать TXT (ID: {file_id}): {decode_err}")
-                 return ""
-    except Exception as e:
-        logging.error(f"Ошибка скачивания/чтения TXT (ID: {file_id}): {str(e)}")
-        return ""
-
-# --- VECTOR STORE FUNCTIONS ---
-
-async def get_relevant_context(query: str, k: int = 3) -> str:
-    """Получает релевантный контекст из векторного хранилища."""
-    collection_name = "documents"
-    empty_context = ""
-    
-    # Определяем базовый путь и файл для хранения пути активной БД
-    base_persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
-    active_db_path_file = os.path.join(base_persist_directory, "active_db_path.txt")
-    persist_directory = None # Инициализируем
-
-    # --- Чтение пути к активной БД --- 
-    try:
-        if os.path.exists(active_db_path_file):
-            with open(active_db_path_file, "r") as f:
-                active_path = f.read().strip()
-            if active_path and os.path.isdir(active_path): # Проверяем, что путь валидный и директория существует
-                persist_directory = active_path
-                logging.info(f"GET_CONTEXT: Используется активная директория из файла: {persist_directory}")
-            else:
-                logging.warning(f"GET_CONTEXT: Путь в файле {active_db_path_file} невалидный ('{active_path}') или директория не существует.")
-        else:
-            logging.warning(f"GET_CONTEXT: Файл {active_db_path_file} не найден. Невозможно определить активную базу.")
-    except Exception as e_read_path:
-        logging.error(f"GET_CONTEXT: Ошибка чтения файла {active_db_path_file}: {e_read_path}")
-
-    # Если не удалось определить активную директорию, выходим
-    if persist_directory is None:
-        logging.error("GET_CONTEXT: Не удалось определить путь к активной базе данных. Контекст не используется.")
-        return empty_context
-    # --- Конец чтения пути --- 
-
-    try:
-        # Убрана проверка на существование persist_directory, т.к. она уже сделана выше при чтении пути
-        # if not os.path.exists(persist_directory) or not os.path.isdir(persist_directory):
-        #     logging.error(f"Директория базы данных не найдена '{persist_directory}'. Контекст не используется.")
-        #     return empty_context
-        try:
-            import chromadb
-            from openai import OpenAI
-        except ImportError as ie:
-            logging.error(f"Не установлена библиотека (chromadb или openai): {str(ie)}. Контекст не используется.")
-            return empty_context
-        try:
-            logging.debug(f"Подключение к ChromaDB: '{persist_directory}'")
-            chroma_client = chromadb.PersistentClient(path=persist_directory)
-        except Exception as client_err:
-            logging.error(f"Ошибка подключения к ChromaDB: {client_err}. Контекст не используется.")
-            return empty_context
-        try:
-            collection = chroma_client.get_collection(name=collection_name)
-            count = collection.count()
-            if count == 0:
-                logging.warning("База векторов пуста. Контекст не используется.")
-                return empty_context
-            logging.info(f"В базе найдено {count} записей")
-        except Exception as coll_err:
-            # Проверяем специфичную ошибку "does not exist"
-            if "does not exist" in str(coll_err).lower():
-                 logging.error(f"Коллекция '{collection_name}' не найдена! Запустите /update. Контекст не используется.")
-            else:
-                 logging.error(f"Ошибка при доступе к коллекции '{collection_name}': {coll_err}. Контекст не используется.")
-            return empty_context
-        try:
-            client = OpenAI()
-            model_name = "text-embedding-3-large"
-            embed_dim = 1536
-            logging.debug(f"Получение вектора для запроса: '{query}' (модель: {model_name}, dim: {embed_dim})")
-            query_embedding_response = client.embeddings.create(
-                input=[query],
-                model=model_name,
-                dimensions=embed_dim
-            )
-            query_embedding = query_embedding_response.data[0].embedding
-        except Exception as embed_error:
-            logging.error(f"Ошибка создания embedding для запроса '{query}': {str(embed_error)}. Контекст не используется.")
-            return empty_context
-        try:
-            logging.debug(f"Выполнение поиска по запросу: '{query}' (k={k})")
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=max(k, 5),
-                include=["documents", "metadatas", "distances"]
-            )
-        except Exception as query_err:
-            logging.error(f"Ошибка при поиске в ChromaDB: {query_err}. Контекст не используется.")
-            return empty_context
-        if not results or not results.get("ids") or not results["ids"][0]:
-            logging.warning(f"Не найдено релевантных документов для запроса: '{query}'. Контекст не используется.")
-            return empty_context
-
-        doc_tuples = list(zip(results["documents"][0], results["metadatas"][0], results["distances"][0]))
-        logging.info(f"Найдено {len(doc_tuples)} документов для запроса '{query}'")
-        # Логируем только первые несколько для краткости
-        for i, (doc_text, metadata, distance) in enumerate(doc_tuples[:5]):
-            logging.debug(f"Док #{i+1}: Src: {metadata.get('source', 'N/A')}, Dist: {distance:.4f}, Text: {doc_text[:100]}...")
-
-        top_docs = doc_tuples[:k]
-        context_pieces = []
-        for doc_text, metadata, distance in top_docs:
-            source = metadata.get('source', 'неизвестный источник')
-            context_pieces.append(f"Контекст из документа '{source}':\n{doc_text}")
-        found_text = "\n\n".join(context_pieces)
-        if not found_text:
-            logging.warning(f"Не найдено релевантных документов (k={k}) для запроса: '{query}'. Контекст не используется.")
-            return empty_context
-        logging.debug(f"Итоговый контекст для '{query}':\n{found_text[:300]}...")
-        return found_text
-    except Exception as e:
-        logging.error(f"Непредвиденная ошибка в get_relevant_context: {str(e)}", exc_info=True)
-        return empty_context
-
-async def update_vector_store(chat_id=None, chunks=None, force_reload=False):
-    """Обновляет векторную базу данных на основе текстовых документов."""
-    collection_name = "documents"
-    
-    # Определяем базовый путь и файл для хранения пути активной БД
-    base_persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
-    active_db_path_file = os.path.join(base_persist_directory, "active_db_path.txt")
-    os.makedirs(base_persist_directory, exist_ok=True) # Убедимся, что базовая директория существует
-
-    # Генерируем уникальный путь для новой БД
-    timestamp_dir_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    persist_directory = os.path.join(base_persist_directory, timestamp_dir_name) 
-    logging.info(f"Новая директория для обновления БД: {persist_directory}")
-    
-    # Удаляем старую вспомогательную функцию и ее вызовы
-    # def _get_current_chunk_count_or_na(): ... (определение функции удаляется)
-    # Заменяем вызовы _get_current_chunk_count_or_na() на 'N/A' или 0 в блоках except
-
-    try:
-        # --- Создание новой директории ---
-        # Нет необходимости удалять persist_directory, т.к. она каждый раз новая
-        try:
-            os.makedirs(persist_directory, mode=0o777, exist_ok=True) 
-            logging.info(f"Целевая директория '{persist_directory}' создана/проверена с правами 0o777.")
-        except Exception as e_mkdir:
-            logging.error(f"НЕ УДАЛОСЬ создать/проверить целевую директорию '{persist_directory}': {str(e_mkdir)}. Обновление прервано.", exc_info=True)
-            return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Failed to create target dir: {str(e_mkdir)}"} # Используем 'N/A'
-
-        logging.info("Начинаем обновление: получаем данные из Google Drive...")
-        documents_data = read_data_from_drive()
-        if not documents_data:
-            logging.warning("Не получено данных из Google Drive. Обновление базы знаний прервано (нет новых данных).")
-            # Если нет данных, нет смысла создавать пустую базу и чистить старые
-            return {'success': True, 'added_chunks': 0, 'total_chunks': 0, 'error': "No data from Google Drive"}
-        
-        logging.info(f"Получено {len(documents_data)} документов из Google Drive.")
-        docs = []
-        markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=[("#", "h1"),("##", "h2"),("###", "h3")])
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-        for doc_data in documents_data:
-            content_str = doc_data.get('content', '')
-            doc_name = doc_data.get('name', 'N/A')
-            if not isinstance(content_str, str) or not content_str.strip():
-                logging.warning(f"Документ '{doc_name}' пуст, пропускаем.")
-                continue
-            enhanced_content = f"Документ: {doc_name}\\\\n\\\\n{content_str}"
-            is_markdown = doc_name.endswith('.md')
-            try:
-                splits = markdown_splitter.split_text(enhanced_content) if is_markdown else text_splitter.split_text(enhanced_content)
-                for split in splits:
-                    if isinstance(split, Document):
-                        page_content = split.page_content
-                        metadata = split.metadata
-                    else:
-                        page_content = split
-                        metadata = {}
-                    metadata["source"] = doc_name
-                    metadata["doc_type"] = "markdown" if is_markdown else "text"
-                    if len(page_content) > text_splitter._chunk_size:
-                         sub_splits = text_splitter.split_text(page_content)
-                         for sub_split in sub_splits:
-                              docs.append(Document(page_content=sub_split, metadata=metadata.copy()))
-                    else:
-                         docs.append(Document(page_content=page_content, metadata=metadata))
-            except Exception as e_doc:
-                 logging.error(f"Не удалось обработать '{doc_name}': {str(e_doc)}")
-                 continue
-        
-        if not docs:
-            logging.warning("После обработки документов не осталось чанков для добавления в базу.")
-            # Если нет чанков, нет смысла создавать пустую базу и чистить старые
-            return {'success': True, 'added_chunks': 0, 'total_chunks': 0, 'error': "No processable chunks from documents"}
-        
-        logging.info(f"Подготовлено {len(docs)} чанков для базы.")
-        
-        try:
-            import chromadb 
-            from openai import OpenAI 
-        except ImportError as ie:
-            logging.error(f"Не установлена необходимая библиотека (chromadb или openai): {str(ie)}")
-            return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"ImportError: {str(ie)}"} # Используем 'N/A'
-        
-        try:
-            client = OpenAI()
-            model_name = "text-embedding-3-large"
-            embed_dim = 1536
-            
-            # ---> НАЧАЛО: Проверка прав на запись <---\n            
-            logging.info(f"Проверка прав на запись в директорию: {persist_directory}")
-            try:
-                test_file_path = os.path.join(persist_directory, "write_test.tmp")
-                with open(test_file_path, "w") as f:
-                    f.write("test")
-                os.remove(test_file_path)
-                logging.info(f"ПРОВЕРКА ПРАВ: Директория '{persist_directory}' доступна для записи.")
-            except Exception as e_write_test:
-                logging.error(f"ОШИБКА ПРАВ: Директория '{persist_directory}' НЕ доступна для записи: {e_write_test}", exc_info=True)
-                # Удаляем неудачно созданную директорию перед выходом
-                try: shutil.rmtree(persist_directory) 
-                except: pass
-                return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Directory not writable: {persist_directory}. Error: {e_write_test}"} # Используем 'N/A'
-            # ---> КОНЕЦ: Проверка прав на запись <---\n
-            
-            logging.info(f"Инициализация ChromaDB клиента в '{persist_directory}'...")
-            chroma_client = chromadb.PersistentClient(path=persist_directory)
-            logging.info(f"ChromaDB клиент инициализирован.")
-            # Проверка создания файла БД
-            sqlite_file_path = os.path.join(persist_directory, "chroma.sqlite3")
-            if os.path.exists(sqlite_file_path):
-                logging.info(f"ПРОВЕРКА: chroma.sqlite3 СУЩЕСТВУЕТ в {persist_directory} после PersistentClient. Права: {oct(os.stat(sqlite_file_path).st_mode)[-4:]}")
-            else:
-                # Это все еще может быть проблемой, но с уникальным путем менее вероятно
-                logging.warning(f"ПРЕДУПРЕЖДЕНИЕ ПРОВЕРКИ: chroma.sqlite3 НЕ СУЩЕСТВУЕТ в {persist_directory} после PersistentClient!")
-
-            time.sleep(1.0) # Оставим небольшую паузу на всякий случай
-            
-            collection = None # Инициализируем переменную
-            try:
-                # ---> НАЧАЛО: Упрощенное создание коллекции <---\n                
-                logging.info(f"Попытка создать коллекцию '{collection_name}' (ожидается, что ее нет)...")
-                collection = chroma_client.create_collection(name=collection_name)
-                logging.info(f"Коллекция '{collection_name}' успешно создана.")
-                # ---> КОНЕЦ: Упрощенное создание коллекции <---\n
-                # ---> НАЧАЛО: Проверка начального количества чанков <---\n                
-                try:
-                    initial_count = collection.count()
-                    logging.info(f"НАЧАЛЬНОЕ количество чанков в ЯВНО СОЗДАННОЙ коллекции '{collection_name}': {initial_count}")
-                except Exception as e_initial_count:
-                    logging.error(f"Ошибка при получении начального количества чанков: {e_initial_count}", exc_info=True)
-                # ---> КОНЕЦ: Проверка начального количества чанков <---\n
-            
-            except chromadb.errors.InternalError as e_internal_chroma:
-                # Эта ветка не должна срабатывать при уникальном пути, но оставим для надежности
-                logging.warning(f"Перехвачено chromadb.errors.InternalError: {e_internal_chroma}")
-                if "already exists" in str(e_internal_chroma).lower() or "already exist" in str(e_internal_chroma).lower():
-                    logging.warning(f"КОНФЛИКТ (InternalError): Коллекция '{collection_name}' уже существует несмотря на уникальный путь! Попытка получить ее.")
-                    try:
-                        collection = chroma_client.get_collection(name=collection_name)
-                        logging.info(f"КОНФЛИКТ (InternalError): Существующая коллекция '{collection_name}' получена.")
-                        # Проверка чанков в полученной коллекции
-                        try:
-                            initial_count = collection.count()
-                            logging.info(f"НАЧАЛЬНОЕ количество чанков в ПОЛУЧЕННОЙ коллекции '{collection_name}': {initial_count}")
-                        except Exception as e_initial_count_get:
-                            logging.error(f"Ошибка при получении начального количества чанков в ПОЛУЧЕННОЙ коллекции: {e_initial_count_get}", exc_info=True)
-                    except Exception as e_get_coll_conflict:
-                        logging.error(f"КОНФЛИКТ (InternalError): Не удалось получить существующую коллекцию '{collection_name}': {e_get_coll_conflict}", exc_info=True)
-                        try: shutil.rmtree(persist_directory) 
-                        except: pass
-                        return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Conflict (InternalError): Collection already exists and could not be retrieved: {str(e_get_coll_conflict)}"} # 'N/A'
-                else:
-                    logging.error(f"Критическая ошибка chromadb.errors.InternalError (не 'already exists'): {e_internal_chroma}", exc_info=True)
-                    try: shutil.rmtree(persist_directory) 
-                    except: pass
-                    return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"ChromaDB InternalError (not 'already exists'): {str(e_internal_chroma)}"} # 'N/A'
-            except Exception as e_coll_other:
-                 logging.error(f"Неожиданная ошибка при создании/получении коллекции '{collection_name}': {e_coll_other}", exc_info=True)
-                 try: shutil.rmtree(persist_directory) 
-                 except: pass
-                 return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Unexpected collection creation/access error: {str(e_coll_other)}"} # 'N/A'
-
-            if collection is None: # Если коллекция так и не была успешно создана или получена
-                logging.error("Не удалось инициализировать объект коллекции.")
-                try: shutil.rmtree(persist_directory) 
-                except: pass
-                return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': "Failed to initialize collection object"} # 'N/A'
-
-            # ... (код подготовки ids_to_add, docs_to_add, metadatas_to_add остается прежним) ...
-            batch_size = 100
-            total_added = 0
-            ids_to_add = []
-            docs_to_add = []
-            metadatas_to_add = []
-            import hashlib
-            existing_ids = set() # При уникальном пути всегда пусто
-            for i, doc_item in enumerate(docs):
-                hasher = hashlib.sha256()
-                hasher.update(doc_item.page_content.encode('utf-8'))
-                hasher.update(str(doc_item.metadata.get('source','N/A')).encode('utf-8'))
-                doc_id = hasher.hexdigest()
-                if doc_id not in existing_ids:
-                    ids_to_add.append(doc_id)
-                    docs_to_add.append(doc_item.page_content)
-                    metadatas_to_add.append(doc_item.metadata)
-
-            logging.info(f"Необходимо добавить {len(ids_to_add)} новых чанков.")
-            if not ids_to_add:
-                 logging.info("Нет новых чанков для добавления.")
-                 # Нет смысла сохранять пустую базу и чистить старые
-                 try: shutil.rmtree(persist_directory) 
-                 except: pass
-                 return {'success': True, 'added_chunks': 0, 'total_chunks': 0, 'error': "No chunks to add"}
-
-            # --- Цикл добавления батчей ---
-            batch_errors = False
-            for i in range(0, len(ids_to_add), batch_size):
-                # ... (код получения батчей и embeddings) ...
-                batch_ids = ids_to_add[i:i+batch_size]
-                batch_docs = docs_to_add[i:i+batch_size]
-                batch_metadatas = metadatas_to_add[i:i+batch_size]
-                current_batch_size = len(batch_ids)
-                logging.info(f"Обработка партии {i//batch_size + 1}/{(len(ids_to_add) - 1)//batch_size + 1} ({current_batch_size} чанков)...")
-                try:
-                    # ... (код получения embeddings) ...
-                    logging.debug(f"Получение {current_batch_size} embeddings...")
-                    embeddings_response = client.embeddings.create(input=batch_docs, model=model_name, dimensions=embed_dim)
-                    batch_embeddings = [e.embedding for e in embeddings_response.data]
-                    logging.debug(f"Добавление {current_batch_size} чанков в ChromaDB...")
-                    collection.add(ids=batch_ids, documents=batch_docs, metadatas=batch_metadatas, embeddings=batch_embeddings)
-                    total_added += current_batch_size
-                    logging.info(f"Добавлено {total_added}/{len(ids_to_add)} новых чанков.")
-                except Exception as e_batch:
-                    logging.error(f"Ошибка при обработке партии {i//batch_size + 1}: {str(e_batch)}", exc_info=True)
-                    logging.warning("Пропуск этой партии из-за ошибки.")
-                    batch_errors = True # Помечаем, что была ошибка
-                    continue 
-            
-            final_added_chunks = total_added
-            final_total_chunks = 0
-            try:
-                final_total_chunks = collection.count()
-                logging.info(f"Итоговое количество чанков в базе: {final_total_chunks}")
-            except Exception as count_err:
-                logging.warning(f"Не удалось получить итоговое количество чанков после добавления: {count_err}")
-                final_total_chunks = 'N/A'
-
-            if batch_errors or final_added_chunks < len(ids_to_add): 
-                error_msg = "Errors during batch processing, not all chunks added."
-                logging.warning(f"Не все чанки были добавлены. Планировалось: {len(ids_to_add)}, добавлено: {final_added_chunks}")
-                # Не сохраняем путь к неполной базе и не чистим старые
-                try: shutil.rmtree(persist_directory) # Удаляем неудачную попытку
-                except Exception as e_rm_fail: logging.warning(f"Не удалось удалить директорию с неполной базой {persist_directory}: {e_rm_fail}")
-                return {'success': False, 'added_chunks': final_added_chunks, 'total_chunks': final_total_chunks, 'error': error_msg}
-            else:
-                # --- УСПЕШНОЕ ЗАВЕРШЕНИЕ ---
-                logging.info(f"Обновление векторного хранилища успешно завершено. Добавлено {final_added_chunks} новых чанков.")
-                
-                # --- Сохраняем путь к активной базе ---
-                try:
-                    with open(active_db_path_file, "w") as f:
-                        f.write(persist_directory)
-                    logging.info(f"Путь к активной базе '{persist_directory}' сохранен в: {active_db_path_file}")
-                except Exception as e_save_path:
-                    logging.error(f"НЕ УДАЛОСЬ сохранить путь к активной базе '{persist_directory}' в файл {active_db_path_file}: {e_save_path}")
-                    # Обновление прошло, но путь не сохранен - это проблема для get_context
-                    # Возвращаем успех, но с предупреждением
-                    return {'success': True, 'added_chunks': final_added_chunks, 'total_chunks': final_total_chunks, 'warning': f"DB updated but failed to save active path: {e_save_path}"}
-                
-                # --- Очистка старых директорий ---
-                logging.info(f"Очистка старых директорий баз данных в {base_persist_directory}...")
-                cleaned_count = 0
-                try:
-                    for item in os.listdir(base_persist_directory):
-                        item_path = os.path.join(base_persist_directory, item)
-                        # Удаляем только директории, имя которых похоже на метку времени, и не текущую
-                        if os.path.isdir(item_path) and item != timestamp_dir_name and re.match(r'^\\d{8}_\\d{6}_\\d{6}$', item):
-                            try:
-                                shutil.rmtree(item_path)
-                                logging.info(f"Удалена старая директория базы данных: {item_path}")
-                                cleaned_count += 1
-                            except Exception as e_clean:
-                                logging.warning(f"Не удалось удалить старую директорию {item_path}: {e_clean}")
-                    logging.info(f"Очистка завершена. Удалено старых директорий: {cleaned_count}")
-                except Exception as e_list_clean:
-                    logging.warning(f"Ошибка при получении списка для очистки старых директорий: {e_list_clean}")
-
-                save_vector_db_creation_time() # Сохраняем время в last_update.txt (для информации)
-                return {'success': True, 'added_chunks': final_added_chunks, 'total_chunks': final_total_chunks}
-
-        except Exception as e_chroma:
-            logging.error(f"Критическая ошибка при работе с ChromaDB: {str(e_chroma)}", exc_info=True)
-            try: shutil.rmtree(persist_directory) # Удаляем неудачную попытку
-            except: pass
-            return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"ChromaDB critical error: {str(e_chroma)}"} # 'N/A'
-            
-    except Exception as e_main:
-        logging.error(f"Критическая ошибка при обновлении векторного хранилища: {str(e_main)}", exc_info=True)
-        # Неясно, была ли создана директория, поэтому не пытаемся ее удалять здесь
-        return {'success': False, 'added_chunks': 0, 'total_chunks': 'N/A', 'error': f"Main update vector store error: {str(e_main)}"} # 'N/A'
-
-# --- Удаление старой функции ---
-# Определение функции _get_current_chunk_count_or_na должно быть полностью удалено из файла.
-# Я не могу явно удалить функцию, но убедитесь, что ее определения больше нет.
-
-def _get_active_db_path():
-    """Читает и возвращает путь к активной базе данных из файла."""
-    base_persist_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
-    active_db_path_file = os.path.join(base_persist_directory, "active_db_path.txt")
-    try:
-        if os.path.exists(active_db_path_file):
-            with open(active_db_path_file, "r") as f:
-                active_path = f.read().strip()
-            if active_path and os.path.isdir(active_path):
-                logging.info(f"_get_active_db_path: Найден активный путь: {active_path}")
-                return active_path
-            else:
-                logging.warning(f"_get_active_db_path: Путь в файле {active_db_path_file} невалидный ('{active_path}') или директория не существует.")
-                return None
-        else:
-            logging.warning(f"_get_active_db_path: Файл {active_db_path_file} не найден.")
-            return None
-    except Exception as e:
-        logging.error(f"_get_active_db_path: Ошибка чтения файла {active_db_path_file}: {e}")
+        logger.error(f"Ошибка при получении сервиса Google Drive: {e}", exc_info=True)
         return None
 
-# Код обработки документов и разбивки на чанки (placeholder)
-# ...
-        logging.error(f"Критическая ошибка в chat_with_assistant для user_id {user_id}: {str(e)}", exc_info=True)
-        return f"Произошла внутренняя ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже."
+def _download_file_content_sync(service, file_id, export_mime_type=None): 
+    if export_mime_type:
+        request = service.files().export_media(fileId=file_id, mimeType=export_mime_type)
+    else:
+        request = service.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done: # Corrected loop condition
+        status, done = downloader.next_chunk()
+        if status: logger.debug(f"Загрузка файла {file_id} (TG): {int(status.progress() * 100)}%.")
+    fh.seek(0)
+    return fh
 
+def read_data_from_drive_sync() -> List[Dict[str,str]]: 
+    service = get_drive_service_sync()
+    if not service:
+        logger.error("Чтение из Google Drive (TG) невозможно: сервис не инициализирован.")
+        return []
+    
+    result_docs: List[Dict[str,str]] = []
+    try:
+        files_response = service.files().list(
+            q=f"'{FOLDER_ID}' in parents and trashed=false",
+            fields="files(id, name, mimeType)", pageSize=1000
+        ).execute()
+        files = files_response.get('files', [])
+        logger.info(f"Найдено {len(files)} файлов в папке Google Drive (TG).")
 
-# --- ФУНКЦИИ БУФЕРИЗАЦИИ (Корректная версия) ---
+        downloader_map = {
+            'application/vnd.google-apps.document': lambda s, f_id: download_google_doc_sync(s, f_id),
+            'application/pdf': lambda s, f_id: download_pdf_sync(s, f_id),
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': lambda s, f_id: download_docx_sync(s, f_id),
+            'text/plain': lambda s, f_id: download_text_sync(s, f_id),
+            'text/markdown': lambda s, f_id: download_text_sync(s, f_id),
+        }
 
-async def process_buffered_messages(user_id: int, chat_id: int, business_connection_id: str | None):
-    """
-    Обрабатывает накопленные сообщения для пользователя после срабатывания таймера.
-    Эта функция вызывается из schedule_buffered_processing.
-    """
-    log_prefix = f"process_buffered_messages(user:{user_id}, chat:{chat_id}):"
-    logging.debug(f"{log_prefix} Начало")
-    lock = user_processing_locks.setdefault(user_id, asyncio.Lock())
+        for file_item in files:
+            file_id, mime_type, file_name = file_item['id'], file_item['mimeType'], file_item['name']
+            if mime_type in downloader_map:
+                logger.info(f"Обработка файла (TG): '{file_name}' (ID: {file_id}, Type: {mime_type})")
+                try:
+                    content_str = downloader_map[mime_type](service, file_id)
+                    if content_str and content_str.strip():
+                        result_docs.append({'name': file_name, 'content': content_str})
+                        logger.info(f"Успешно прочитан файл (TG): '{file_name}' ({len(content_str)} симв)")
+                    else:
+                        logger.warning(f"Файл '{file_name}' (TG) пуст или не удалось извлечь контент.")
+                except Exception as e_read_file:
+                    logger.error(f"Ошибка чтения файла '{file_name}' (TG): {e_read_file}", exc_info=True)
+            else:
+                logger.debug(f"Файл '{file_name}' (TG) имеет неподдерживаемый тип ({mime_type}).")
+    except Exception as e:
+        logger.error(f"Критическая ошибка при чтении из Google Drive (TG): {e}", exc_info=True)
+        return []
+    logger.info(f"Чтение из Google Drive (TG) завершено. Прочитано {len(result_docs)} документов.")
+    return result_docs
 
-    if lock.locked():
-        logging.warning(f"{log_prefix} Блокировка уже занята. Пропускаем этот вызов.")
-        # Не удаляем таймер здесь, так как он уже должен быть удален в schedule_buffered_processing
+def download_google_doc_sync(service, file_id) -> str: 
+    fh = _download_file_content_sync(service, file_id, export_mime_type='text/plain')
+    return fh.getvalue().decode('utf-8', errors='ignore')
+
+def download_pdf_sync(service, file_id) -> str: 
+    fh = _download_file_content_sync(service, file_id)
+    try:
+        pdf_reader = PyPDF2.PdfReader(fh)
+        return "".join(page.extract_text() + "\n" for page in pdf_reader.pages if page.extract_text())
+    except Exception as e:
+         logger.error(f"Ошибка обработки PDF (ID: {file_id}, TG): {e}", exc_info=True)
+         return ""
+
+def download_docx_sync(service, file_id) -> str: 
+    fh = _download_file_content_sync(service, file_id)
+    try:
+        doc = docx.Document(fh)
+        return "\n".join(paragraph.text for paragraph in doc.paragraphs if paragraph.text)
+    except Exception as e:
+         logger.error(f"Ошибка обработки DOCX (ID: {file_id}, TG): {e}", exc_info=True)
+         return ""
+
+def download_text_sync(service, file_id) -> str: 
+    fh = _download_file_content_sync(service, file_id)
+    try:
+        return fh.getvalue().decode('utf-8')
+    except UnicodeDecodeError:
+         logger.warning(f"Не удалось декодировать {file_id} (TG) как UTF-8, пробуем cp1251.")
+         try: return fh.getvalue().decode('cp1251', errors='ignore')
+         except Exception as e_decode:
+              logger.error(f"Не удалось декодировать {file_id} (TG): {e_decode}")
+              return ""
+
+# --- Helper Functions ---
+async def get_or_create_thread(user_id: int) -> Optional[str]:
+    if user_id in user_threads:
+        thread_id = user_threads[user_id]
+        try:
+            await openai_client.beta.threads.messages.list(thread_id=thread_id, limit=1)
+            logger.info(f"Используем существующий тред {thread_id} для user_id={user_id} (TG)")
+            return thread_id
+        except openai.NotFoundError:
+            logger.warning(f"Тред {thread_id} не найден в OpenAI для user_id={user_id} (TG). Создаем новый.")
+            if user_id in user_threads: del user_threads[user_id]
+        except Exception as e:
+            logger.error(f"Ошибка доступа к треду {thread_id} для user_id={user_id} (TG): {e}. Создаем новый.")
+            if user_id in user_threads: del user_threads[user_id]
+
+    try:
+        logger.info(f"Создаем новый тред для user_id={user_id} (TG)...")
+        thread = await openai_client.beta.threads.create()
+        thread_id = thread.id
+        user_threads[user_id] = thread_id
+        user_messages[user_id] = [] 
+        logger.info(f"Создан новый тред {thread_id} для user_id={user_id} (TG)")
+        return thread_id
+    except Exception as e:
+        logger.error(f"Критическая ошибка при создании нового треда для user_id={user_id} (TG): {e}", exc_info=True)
+        return None
+
+async def cleanup_old_messages_in_memory(): 
+    current_time = datetime.datetime.now()
+    for user_id in list(user_messages.keys()):
+        async with user_processing_locks[user_id]:
+            if user_id in user_messages:
+                user_messages[user_id] = [
+                    msg for msg in user_messages[user_id]
+                    if current_time - msg['timestamp'] < MESSAGE_LIFETIME
+                ]
+
+async def add_message_to_history(user_id: int, role: str, content: str):
+    async with user_processing_locks[user_id]:
+        if user_id not in user_messages:
+            user_messages[user_id] = []
+        user_messages[user_id].append({
+            'role': role,
+            'content': content,
+            'timestamp': datetime.datetime.now()
+        })
+
+# --- Silence Mode Management ---
+async def save_silence_state_to_file():
+    logger.debug("Сохранение состояния режимов молчания (TG) в файл...")
+    data_to_save = {str(chat_id): True for chat_id, is_silent in chat_silence_state.items() if is_silent}
+    try:
+        def _save():
+            with open(SILENCE_STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data_to_save, f, indent=4)
+        await asyncio.to_thread(_save)
+        logger.info(f"Состояние режимов молчания (TG) сохранено в {SILENCE_STATE_FILE}")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении состояния режимов молчания (TG): {e}", exc_info=True)
+
+async def load_silence_state_from_file():
+    global chat_silence_state
+    logger.info("Загрузка состояния режимов молчания (TG) из файла...")
+    try:
+        def _load():
+            if not os.path.exists(SILENCE_STATE_FILE):
+                logger.info(f"Файл {SILENCE_STATE_FILE} (TG) не найден. Пропускаем загрузку.")
+                return None
+            with open(SILENCE_STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        
+        loaded_data = await asyncio.to_thread(_load)
+        if not loaded_data:
+            return
+
+        restored_count = 0
+        for chat_id_str, should_be_silent in loaded_data.items():
+            try:
+                chat_id = int(chat_id_str)
+                if should_be_silent: 
+                    chat_silence_state[chat_id] = True
+                    logger.info(f"Восстановлен постоянный режим молчания для chat_id={chat_id} (TG)")
+                    restored_count += 1
+            except (ValueError, KeyError) as e:
+                logger.error(f"Ошибка при обработке записи (TG) для chat_id_str='{chat_id_str}': {e}", exc_info=True)
+        
+        if restored_count > 0:
+            logger.info(f"Успешно восстановлено {restored_count} состояний постоянного молчания (TG).")
+        else:
+            logger.info("Активных состояний постоянного молчания для восстановления (TG) не найдено.")
+    except FileNotFoundError:
+        logger.info(f"Файл {SILENCE_STATE_FILE} (TG) не найден. Запуск с чистым состоянием молчания.")
+    except json.JSONDecodeError:
+        logger.error(f"Ошибка декодирования JSON из файла {SILENCE_STATE_FILE} (TG). Файл может быть поврежден.")
+    except Exception as e:
+        logger.error(f"Непредвиденная ошибка при загрузке состояния режимов молчания (TG): {e}", exc_info=True)
+
+async def is_chat_silent(chat_id: int) -> bool:
+    return chat_silence_state.get(chat_id, False)
+
+async def set_chat_silence_permanently(chat_id: int, silent: bool):
+    log_prefix = f"set_chat_silence_permanently(chat:{chat_id}, silent:{silent}):"
+    current_state = chat_silence_state.get(chat_id, False)
+    if current_state == silent:
+        logger.debug(f"{log_prefix} Состояние постоянного молчания не изменилось ({silent}).")
         return
 
-    async with lock:
-        logging.debug(f"{log_prefix} Блокировка получена")
-        # Забираем сообщения из буфера ТОЛЬКО ПОСЛЕ получения блокировки
-        messages_to_process = pending_messages.pop(user_id, [])
-        # Таймер должен быть уже удален в schedule_buffered_processing к моменту входа сюда
-        if user_id in user_message_timers:
-             logging.warning(f"{log_prefix} Таймер все еще существует внутри блокировки! Удаляем.")
-             # Отменяем на всякий случай, вдруг это другая задача
-             try: 
-                user_message_timers[user_id].cancel()
-             except Exception as e:
-                logging.debug(f"{log_prefix} Ошибка при отмене таймера: {e}")
+    if silent:
+        chat_silence_state[chat_id] = True
+        logger.info(f"{log_prefix} Включен ПОСТОЯННЫЙ режим молчания.")
+    else: 
+        if chat_id in chat_silence_state:
+            del chat_silence_state[chat_id]
+            logger.info(f"{log_prefix} ПОСТОЯННЫЙ режим молчания снят.")
+        else:
+            logger.debug(f"{log_prefix} Попытка снять молчание, но чат не был в списке.")
+    await save_silence_state_to_file()
+
+# --- Message Buffering ---
+async def schedule_buffered_processing(user_id: int, chat_id: int, business_connection_id: Optional[str]):
+    log_prefix = f"schedule_buffered_processing(user:{user_id}, chat:{chat_id}):"
+    current_task = asyncio.current_task()
+    try:
+        logger.debug(f"{log_prefix} Ожидание {MESSAGE_BUFFER_SECONDS} секунд...")
+        await asyncio.sleep(MESSAGE_BUFFER_SECONDS)
+
+        task_in_dict = user_message_timers.get(user_id)
+        if task_in_dict is not current_task:
+            logger.info(f"{log_prefix} Таймер сработал, но он устарел. Обработка отменена.")
+            return
+
+        if user_id in user_message_timers: # Проверка перед удалением
              del user_message_timers[user_id]
+        logger.debug(f"{log_prefix} Таймер сработал и удален. Вызов process_buffered_messages.")
+        asyncio.create_task(process_buffered_messages(user_id, chat_id, business_connection_id))
+
+    except asyncio.CancelledError:
+        logger.info(f"{log_prefix} Таймер отменен.")
+    except Exception as e:
+        logger.error(f"{log_prefix} Ошибка в задаче таймера: {str(e)}", exc_info=True)
+        if user_id in user_message_timers and user_message_timers.get(user_id) is current_task:
+            del user_message_timers[user_id]
+
+async def process_buffered_messages(user_id: int, chat_id: int, business_connection_id: Optional[str]):
+    log_prefix = f"process_buffered_messages(user:{user_id}, chat:{chat_id}):"
+    async with user_processing_locks[user_id]: 
+        logger.debug(f"{log_prefix} Блокировка для user_id={user_id} получена.")
+        messages_to_process = pending_messages.pop(user_id, [])
+        
+        if user_id in user_message_timers: 
+            logger.warning(f"{log_prefix} Таймер для user_id={user_id} все еще существовал! Отменяем и удаляем.")
+            timer_to_cancel = user_message_timers.pop(user_id)
+            if not timer_to_cancel.done():
+                try: timer_to_cancel.cancel()
+                except Exception as e_inner_cancel: logger.debug(f"{log_prefix} Ошибка отмены таймера: {e_inner_cancel}")
 
         if not messages_to_process:
-            logging.info(f"{log_prefix} Нет сообщений в буфере для обработки.")
-            # Блокировка будет освобождена
+            logger.info(f"{log_prefix} Нет сообщений в буфере для user_id={user_id}.")
             return
 
         combined_input = "\n".join(messages_to_process)
         num_messages = len(messages_to_process)
-        logging.info(f"{log_prefix} Объединенный запрос ({num_messages} сообщ.): {combined_input[:200]}...")
-
+        logger.info(f'{log_prefix} Объединенный запрос для user_id={user_id} ({num_messages} сообщ.): "{combined_input[:200]}..."')
+        
         try:
-            logging.debug(f"{log_prefix} Вызов chat_with_assistant")
-            response = await chat_with_assistant(user_id, combined_input)
-            logging.info(f"{log_prefix} Получен ответ (начало): {response[:200]}...")
-            try:
-                logging.debug(f"{log_prefix} Отправка ответа (business_id: {business_connection_id})")
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=response,
-                    business_connection_id=business_connection_id
-                )
-                logging.info(f"{log_prefix} Успешно отправлен ответ.")
-            except Exception as send_error:
-                logging.error(f"{log_prefix} Ошибка отправки ответа: {str(send_error)}")
-        except Exception as processing_error:
-            logging.error(f"{log_prefix} Ошибка вызова chat_with_assistant: {str(processing_error)}", exc_info=True)
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text="Извините, произошла внутренняя ошибка при обработке вашего запроса.",
-                    business_connection_id=business_connection_id
-                )
-            except Exception as error_msg_error:
-                logging.error(f"{log_prefix} Не удалось отправить сообщение об ошибке: {str(error_msg_error)}")
-        # Блокировка освобождается
-        logging.debug(f"{log_prefix} Блокировка освобождена")
+            action_params = {"chat_id": chat_id, "action": ChatAction.TYPING}
+            if business_connection_id: action_params["business_connection_id"] = business_connection_id
+            await bot.send_chat_action(**action_params)
+            logger.debug(f"{log_prefix} Отправлен статус 'typing'.")
 
-async def schedule_buffered_processing(user_id: int, chat_id: int, business_connection_id: str | None):
-    """
-    Задача, которая ждет MESSAGE_BUFFER_SECONDS и затем вызывает process_buffered_messages.
-    """
-    log_prefix = f"schedule_buffered_processing(user:{user_id}, chat:{chat_id}):"
-    current_task = asyncio.current_task()
-    try:
-        logging.debug(f"{log_prefix} Ожидание {MESSAGE_BUFFER_SECONDS} секунд...")
-        await asyncio.sleep(MESSAGE_BUFFER_SECONDS)
-
-        # --- Добавленное логирование для отладки ---
-        task_in_dict = user_message_timers.get(user_id)
-        comparison_result = task_in_dict is not current_task
-        logging.debug(f"{log_prefix} Таймер сработал.")
-        logging.debug(f"{log_prefix}   - Текущая задача (current_task): {current_task}")
-        logging.debug(f"{log_prefix}   - Задача в словаре (task_in_dict): {task_in_dict}")
-        logging.debug(f"{log_prefix}   - Сравнение (task_in_dict is not current_task): {comparison_result}")
-        # --- Конец добавленного логирования ---
-
-        # Таймер сработал. Проверяем, актуальна ли эта задача таймера
-        if task_in_dict is not current_task:
-            # Если задачи не совпадают, значит, был создан НОВЫЙ таймер.
-            # Эта задача устарела, ничего не делаем. Новый таймер сработает позже.
-            logging.info(f"{log_prefix} Таймер сработал, но он устарел (был заменен новым). Обработка отменена.")
-            return
-
-        # Если это все еще актуальный таймер, удаляем его и запускаем обработку
-        del user_message_timers[user_id]
-        logging.debug(f"{log_prefix} Таймер сработал и удален. Вызов process_buffered_messages.")
-        asyncio.create_task(process_buffered_messages(user_id, chat_id, business_connection_id))
-
-    except asyncio.CancelledError:
-        logging.info(f"{log_prefix} Таймер отменен (вероятно, пришло новое сообщение).")
-        # Если таймер был отменен, он уже должен быть удален из словаря при создании нового
-    except Exception as e:
-        logging.error(f"{log_prefix} Ошибка в задаче таймера: {str(e)}", exc_info=True)
-        # Удаляем таймер в случае непредвиденной ошибки, если он все еще там
-        if user_id in user_message_timers and user_message_timers[user_id] is current_task:
-            del user_message_timers[user_id]
-
-# --- РЕЖИМ МОЛЧАНИЯ --- 
-# (is_chat_silent, set_chat_silence, deactivate_silence_after_timeout)
-# ... (Код этих функций с улучшенными логами и проверками)
-async def is_chat_silent(chat_id):
-    """Проверяет, должен ли бот молчать в данном чате."""
-    return chat_silence_state.get(chat_id, False)
-
-async def set_chat_silence(chat_id, silent: bool):
-    """Устанавливает статус молчания для чата и управляет таймером."""
-    log_prefix = f"set_chat_silence(chat:{chat_id}):"
-    current_state = chat_silence_state.get(chat_id, False)
-    if current_state == silent:
-         # Если состояние не меняется, но silent=True, продлеваем таймер
-         if silent and chat_id in chat_silence_timers:
-              logging.debug(f"{log_prefix} Продление режима молчания.")
-              # Отменяем старый и создаем новый - самый простой способ продлить
-              if not chat_silence_timers[chat_id].done():
-                  chat_silence_timers[chat_id].cancel()
-              silence_task = asyncio.create_task(deactivate_silence_after_timeout(chat_id))
-              chat_silence_timers[chat_id] = silence_task
-         else:
-              logging.debug(f"{log_prefix} Состояние молчания не изменилось ({silent}).")
-         return
-
-    chat_silence_state[chat_id] = silent
-    if silent:
-        logging.info(f"{log_prefix} Включение режима молчания на {MANAGER_ACTIVE_TIMEOUT} сек.")
-        if chat_id in chat_silence_timers and not chat_silence_timers[chat_id].done():
-            chat_silence_timers[chat_id].cancel()
-        silence_task = asyncio.create_task(deactivate_silence_after_timeout(chat_id))
-        chat_silence_timers[chat_id] = silence_task
-    else:
-        logging.info(f"{log_prefix} Выключение режима молчания.")
-        if chat_id in chat_silence_timers and not chat_silence_timers[chat_id].done():
-            chat_silence_timers[chat_id].cancel()
-            # Удаляем сразу после отмены
-            del chat_silence_timers[chat_id]
-
-async def deactivate_silence_after_timeout(chat_id, timeout=MANAGER_ACTIVE_TIMEOUT):
-    """Автоматически деактивирует режим молчания после таймаута."""
-    log_prefix = f"deactivate_silence_after_timeout(chat:{chat_id}):"
-    current_task = asyncio.current_task()
-    try:
-        await asyncio.sleep(timeout)
-        # Проверяем перед деактивацией
-        if await is_chat_silent(chat_id):
-            logging.info(f"{log_prefix} Таймер истек. Деактивация режима молчания.")
-            await set_chat_silence(chat_id, False)
-        else:
-            logging.info(f"{log_prefix} Таймер истек, но режим молчания уже был деактивирован.")
-    except asyncio.CancelledError:
-        logging.info(f"{log_prefix} Таймер деактивации отменен.")
-    except Exception as e:
-        logging.error(f"{log_prefix} Ошибка: {str(e)}")
-    finally:
-        # Удаляем задачу из словаря только если это была именно она
-        if chat_id in chat_silence_timers and chat_silence_timers[chat_id] is current_task:
-            del chat_silence_timers[chat_id]
-
-# --- ОБРАБОТЧИКИ КОМАНД TELEGRAM ---
-# (Команды /start, /update, /check_db, /debug_db, /db_time, /full_debug, /debug_context обновлены)
-# (Команды /clear, /reset обновлены для работы с буфером)
-
-@router.message(Command("start"))
-async def start_command(message: aiogram_types.Message):
-    """Приветственное сообщение при старте и запуск обновления базы."""
-    await message.answer("👋 Здравствуйте! Я готов к работе. Обновляю базу знаний, это может занять некоторое время...")
-    asyncio.create_task(run_update_and_notify(message.chat.id))
-
-async def run_update_and_notify(chat_id: int):
-    """Выполняет обновление базы и уведомляет пользователя."""
-    logging.info(f"Запущено обновление базы знаний по команде из чата {chat_id}...")
-    update_result = await update_vector_store(chat_id)
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        if chat_id is None:
-            logging.info("Не отправляем уведомление, т.к. chat_id=None")
-            return
+            response_text = await chat_with_assistant(user_id, combined_input)
             
-        if update_result['success']:
-            message_text = (
-                f"✅ База знаний успешно обновлена!\n"
-                f"🕒 Время: {current_time}\n"
-                f"➕ Добавлено новых чанков: {update_result.get('added_chunks', 'N/A')}\n"
-                f"📊 Всего чанков в базе: {update_result.get('total_chunks', 'N/A')}"
-            )
-            await bot.send_message(chat_id, message_text)
-            logging.info(f"Обновление базы (чат {chat_id}) завершено успешно.")
-        else:
-            error_details = update_result.get('error', 'Подробности в основных логах.')
-            message_text = (
-                 f"⚠️ Произошла ошибка во время обновления базы знаний.\n"
-                 f"🕒 Время: {current_time}\n"
-                 f"Бот будет использовать старые данные (если они есть).\n"
-                 f"Детали ошибки: {error_details}"
-            )
-            await bot.send_message(chat_id, message_text)
-            logging.error(f"Обновление базы (чат {chat_id}) завершено с ошибкой: {error_details}")
-    except Exception as e:
-        logging.error(f"Ошибка при отправке уведомления об обновлении базы в чат {chat_id}: {e}")
-
-@router.message(Command("clear"))
-async def clear_history(message: aiogram_types.Message):
-    """Очищает историю сообщений пользователя и сбрасывает буфер."""
-    user_id = message.from_user.id
-    log_prefix = f"clear_history(user:{user_id}):"
-    logging.info(f"{log_prefix} Команда получена.")
-    if user_id in user_messages:
-        user_messages[user_id] = []
-        logging.debug(f"{log_prefix} История сообщений очищена.")
-    if user_id in pending_messages:
-        del pending_messages[user_id]
-        logging.debug(f"{log_prefix} Буфер сообщений очищен.")
-    if user_id in user_message_timers:
-        old_timer = user_message_timers.pop(user_id)
-        if not old_timer.done():
-            try:
-                old_timer.cancel()
-                logging.debug(f"{log_prefix} Активный таймер обработки отменен.")
-            except Exception as e:
-                logging.warning(f"{log_prefix} Ошибка при отмене таймера: {e}")
-    await message.answer("🧹 История разговора и буфер текущих сообщений очищены!")
-
-@router.message(Command("reset"))
-async def reset_conversation(message: aiogram_types.Message):
-    """Полностью сбрасывает разговор, включая удаление треда, истории и буфера."""
-    user_id = message.from_user.id
-    log_prefix = f"reset_conversation(user:{user_id}):"
-    logging.info(f"{log_prefix} Команда получена.")
-    # Очистка локальных данных
-    if user_id in user_messages: del user_messages[user_id]
-    if user_id in pending_messages: del pending_messages[user_id]
-    if user_id in user_message_timers:
-        old_timer = user_message_timers.pop(user_id)
-        if not old_timer.done():
-            try: 
-                old_timer.cancel()
-            except Exception as e:
-                logging.debug(f"{log_prefix} Ошибка при отмене таймера: {e}")
-    # Очистка треда OpenAI (локально)
-    if user_id in user_threads:
-        thread_id_to_delete = user_threads.pop(user_id)
-        logging.info(f"{log_prefix} Удаление локальной записи о треде {thread_id_to_delete}...")
-        # Опционально: физическое удаление треда на стороне OpenAI
-        # try:
-        #     client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        #     client.beta.threads.delete(thread_id_to_delete)
-        #     logging.info(f"{log_prefix} Тред {thread_id_to_delete} удален на OpenAI.")
-        # except Exception as e_del:
-        #     logging.warning(f"{log_prefix} Не удалось удалить тред {thread_id_to_delete} на OpenAI: {e_del}")
-
-    logging.debug(f"{log_prefix} Сброс завершен.")
-    await message.answer("🔄 Разговор полностью сброшен! Ваш следующий вопрос начнет новый диалог.")
-
-@router.message(Command("reset_all"))
-async def reset_all_conversations(message: aiogram_types.Message):
-    """Полностью сбрасывает все разговоры всех пользователей (только для администратора)."""
-    user_id = message.from_user.id
-    if user_id != ADMIN_USER_ID:
-        await message.answer("❌ У вас нет прав для выполнения этой команды!")
-        return
-    logging.warning(f"Администратор {user_id} инициировал полный сброс!")
-    active_timer_count = len(user_message_timers)
-    for task in user_message_timers.values():
-        try: 
-            task.cancel()
+            message_params = {"chat_id": chat_id, "text": response_text}
+            if business_connection_id: message_params["business_connection_id"] = business_connection_id
+            await bot.send_message(**message_params)
+            logger.info(f"{log_prefix} Успешно обработан и отправлен ответ для user_id={user_id}.")
         except Exception as e:
-            logging.debug(f"Ошибка при отмене таймера: {e}")
-    user_message_timers.clear()
-    pending_messages.clear()
-    user_messages.clear()
-    user_threads.clear()
-    logging.info(f"Полный сброс: {active_timer_count} таймеров отменено, буферы, история и треды очищены.")
-    await message.answer("🔄 Все разговоры (история, буферы, таймеры, треды) всех пользователей полностью сброшены!")
-
-@router.message(Command("update"))
-async def update_knowledge(message: aiogram_types.Message):
-    """Запускает обновление базы знаний вручную и уведомляет."""
-    await message.answer("🔄 Обновляю базу знаний в фоновом режиме...")
-    asyncio.create_task(run_update_and_notify(message.chat.id))
-
-@router.message(Command("check_db"))
-async def check_database(message: aiogram_types.Message):
-    """Проверяет наличие и содержимое активной векторной базы знаний."""
-    active_persist_directory = _get_active_db_path()
-    
-    if not active_persist_directory:
-        await message.answer("❌ Активная база знаний не определена (файл пути не найден или некорректен).")
-        return
-
-    # Проверка существования активной директории (хотя _get_active_db_path это уже делает)
-    if not os.path.exists(active_persist_directory) or not os.path.isdir(active_persist_directory):
-        await message.answer(f"❌ Активная директория базы '{active_persist_directory}', указанная в файле, не найдена!")
-        return
-        
-    files_list = []
-    try:
-        files_list = os.listdir(active_persist_directory)
-        # Пытаемся подключиться и получить количество записей
-        import chromadb
-        client = chromadb.PersistentClient(path=active_persist_directory)
-        try:
-            collection = client.get_collection("documents")
-            count = collection.count()
-            await message.answer(f"✅ Активная база: '{active_persist_directory}' ({count} зап.).\nФайлы: {', '.join(files_list)}")
-        except Exception as e:
-             await message.answer(f"✅ Активная база: '{active_persist_directory}' существует, но ошибка доступа к коллекции 'documents': {e}\nФайлы: {', '.join(files_list)}")
-    except ImportError:
-         await message.answer(f"✅ Активная директория: '{active_persist_directory}'.\nФайлы: {', '.join(files_list)}\n(chromadb не импортирован для проверки коллекции)")
-    except Exception as e:
-         files_str = ", ".join(files_list) if files_list else "(не удалось прочитать)"
-         await message.answer(f"✅ Активная директория: '{active_persist_directory}'.\nФайлы: {files_str}\n(Ошибка доступа к базе/директории: {e})")
-
-@router.message(Command("debug_db"))
-async def debug_database(message: aiogram_types.Message):
-    """Диагностика активной базы данных векторов."""
-    try:
-        await message.answer("🔍 Проверяю активную базу векторов...")
-        active_persist_directory = _get_active_db_path()
-
-        if not active_persist_directory:
-            await message.answer("❌ Активная база знаний не определена (файл пути не найден или некорректен).")
-            # Дополнительно проверим базовую директорию на всякий случай
-            base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
-            if os.path.exists(base_dir):
-                await message.answer(f"Базовая директория '{base_dir}' существует.")
-            else:
-                await message.answer(f"Базовая директория '{base_dir}' не существует.")
-            return
-
-        await message.answer(f"📂 Активный путь базы: {active_persist_directory}")
-
-        # Проверка существования (хотя _get_active_db_path это уже делает)
-        if not os.path.exists(active_persist_directory) or not os.path.isdir(active_persist_directory):
-            await message.answer(f"❌ Директория активной базы '{active_persist_directory}', указанная в файле, не найдена!")
-            return
-            
-        db_time = get_vector_db_creation_time() # Время последнего успешного ЗАВЕРШЕНИЯ обновления
-        time_str = db_time.strftime("%d.%m.%Y %H:%M:%S") if db_time else "Не определено (last_update.txt)"
-        await message.answer(f"📅 Время последнего успешного обновления (из last_update.txt): {time_str}")
-        
-        try:
-            files = os.listdir(active_persist_directory)
-            await message.answer(f"📄 Файлы в активной базе: {', '.join(files)}")
-        except Exception as list_err:
-             await message.answer(f"❌ Не удалось прочитать файлы в активной директории: {list_err}")
-
-        try:
-            import chromadb
-            client = chromadb.PersistentClient(path=active_persist_directory)
-            await message.answer("✅ Клиент ChromaDB для активной базы создан.")
+            logger.error(f"{log_prefix} Ошибка при обработке или отправке ответа для user_id={user_id}: {e}", exc_info=True)
             try:
-                collection = client.get_collection("documents")
-                count = collection.count()
-                await message.answer(f"✅ Коллекция 'documents' в активной базе ({count} зап.).")
-                await message.answer("⏳ Тестовый запрос 'тест' к активной базе...")
-                # get_relevant_context уже использует _get_active_db_path внутри себя
-                test_context = await get_relevant_context("тест", k=1) 
-                if test_context:
-                    await message.answer(f"✅ Запрос к активной базе успешен. Контекст:\n{test_context[:500]}...")
-                else:
-                     await message.answer("⚠️ Запрос к активной базе выполнен, контекст не найден.")
-            except Exception as e_coll:
-                await message.answer(f"❌ Ошибка доступа к коллекции в активной базе: {str(e_coll)}")
-        except ImportError:
-            await message.answer("❌ chromadb не импортирован.")
-        except Exception as e_client:
-            await message.answer(f"❌ Ошибка клиента ChromaDB для активной базы: {str(e_client)}")
-    except Exception as e_main:
-        await message.answer(f"❌ Ошибка диагностики: {str(e_main)}")
+                error_msg_params = {"chat_id": chat_id, "text": "Произошла внутренняя ошибка. Попробуйте позже."}
+                if business_connection_id: error_msg_params["business_connection_id"] = business_connection_id
+                await bot.send_message(**error_msg_params)
+            except Exception as send_err_e: logger.error(f"{log_prefix} Не удалось отправить сообщение об ошибке user_id={user_id}: {send_err_e}")
+        finally:
+            logger.debug(f"{log_prefix} Блокировка для user_id={user_id} освобождена.")
 
-@router.message(Command("db_time"))
-async def check_db_time(message: aiogram_types.Message):
-    """Показывает время последнего обновления базы данных."""
-    db_time = get_vector_db_creation_time()
-    if db_time:
-        time_str = db_time.strftime("%d.%m.%Y %H:%M:%S")
-        await message.answer(f"📅 База данных обновлялась (файл/мод.): {time_str}")
-    else:
-        await message.answer("❌ Не удалось определить время обновления.")
-
-@router.message(Command("full_debug"))
-async def full_debug(message: aiogram_types.Message):
-    """Полная диагностика системы и базы данных"""
-    try:
-        await message.answer("🔎 Запускаю полную диагностику...")
-        current_dir = os.getcwd()
-        await message.answer(f"🐍 Рабочая директория python: {current_dir}")
-        
-        # --- Проверка активной базы --- 
-        active_persist_directory = _get_active_db_path()
-        if active_persist_directory:
-            await message.answer(f"✅ Активный путь базы данных (из файла): {active_persist_directory}")
-        else:
-            await message.answer("⚠️ Активный путь базы данных не определен (файл пути не найден/некорректен).")
-        # --- Конец проверки активной базы ---
-        
-        # --- Проверка базовой директории (остается полезной для обзора) ---
-        base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_vector_db")
-        await message.answer(f"📂 Проверяемая базовая директория: {base_dir}")
-        
-        # Убираем лишний db_paths, проверяем только base_dir
-        # db_paths = ["./local_vector_db", os.path.join(current_dir, "local_vector_db")]
-        # found_path = None 
-        # for path in db_paths:
-        
-        if os.path.exists(base_dir) and os.path.isdir(base_dir):
-            await message.answer(f"✅ Базовая директория существует.")
-            # found_path = base_dir
-            try:
-                items = os.listdir(base_dir)
-                subdirs = [d for d in items if os.path.isdir(os.path.join(base_dir, d)) and re.match(r'^\\d{8}_\\d{6}_\\d{6}$', d)]
-                other_files = [f for f in items if os.path.isfile(os.path.join(base_dir, f))]
-                
-                await message.answer(f"📄 Поддиректорий с базами данных (похожих на временные метки): {len(subdirs)}")
-                if subdirs:
-                    # Исправляем f-string для корректного отображения
-                    last_five_sorted_subdirs = ", ".join(sorted(subdirs)[-5:])
-                    await message.answer(f"   (Последние 5 отсортированных поддиректорий: {last_five_sorted_subdirs})")
-                # Исправляем f-string для корректного отображения списка файлов
-                other_files_str = ", ".join(other_files)
-                await message.answer(f"📄 Других файлов в базовой директории: {len(other_files)} ({other_files_str})")
-                    
-                # Размер и время модификации самой базовой директории (не очень информативно)
-                # total_size = sum(os.path.getsize(os.path.join(base_dir, f)) for f in items if os.path.isfile(os.path.join(base_dir, f)))
-                # await message.answer(f"📊 Общий размер файлов в базовой директории: {total_size/1024/1024:.2f} МБ")
-                # try:
-                #      latest_mod = max(os.path.getmtime(os.path.join(base_dir, f)) for f in items if os.path.isfile(os.path.join(base_dir, f)))
-                #      mod_time = datetime.fromtimestamp(latest_mod)
-                #      await message.answer(f"🕒 Последнее изменение файла в базовой директории: {mod_time.strftime('%d.%m.%Y %H:%M:%S')}")
-                # except ValueError:
-                #       await message.answer("🕒 Нет файлов для определения времени.")
-                # except Exception as e_time:
-                #       await message.answer(f"❌ Ошибка времени изменения: {str(e_time)}")
-            except Exception as e_list:
-                 await message.answer(f"❌ Ошибка листинга {base_dir}: {str(e_list)}")
-        else:
-            await message.answer(f"❌ Базовая директория не существует: {base_dir}")
-        # --- Конец проверки базовой директории ---
-        
-        # Время из last_update.txt все еще может быть полезно
-        db_time_from_file = get_vector_db_creation_time()
-        time_str = db_time_from_file.strftime("%d.%m.%Y %H:%M:%S") if db_time_from_file else "Не найдено"
-        await message.answer(f"📅 Время последнего УСПЕШНОГО обновления (из last_update.txt): {time_str}")
-        
-        await message.answer("✅ Диагностика путей завершена.")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка диагностики: {str(e)}")
-
-@router.message(Command("debug_context"))
-async def debug_context(message: aiogram_types.Message):
-    """Показывает контекст, который модель получает для запроса."""
-    user_id = message.from_user.id
-    query = message.text.replace("/debug_context", "").strip()
-    if not query:
-        await message.answer("Укажите запрос после команды: `/debug_context ваш вопрос`")
-        return
-    await message.answer(f"🔍 Получаю контекст для: '{query}'...")
-    context = await get_relevant_context(query)
-    if not context:
-        await message.answer("❌ Контекст из базы не найден.")
-        history = user_messages.get(user_id, [])
-        if history:
-             history_text = "\n".join([f"{msg['role']}: {msg['content'][:100]}..." for msg in history[-5:]])
-             await message.answer(f"📜 История диалога (последние 5):\n{history_text}")
-        return
-    max_length = 4000
-    if len(context) <= max_length:
-        await message.answer(f"📚 Найденный контекст:\n\n{context}")
-    else:
-        parts = [context[i:i+max_length] for i in range(0, len(context), max_length)]
-        await message.answer(f"📚 Найденный контекст ({len(parts)} частей):")
-        for i, part in enumerate(parts):
-            try:
-                await message.answer(f"Часть {i+1}/{len(parts)}:\n\n{part}")
-                await asyncio.sleep(0.5)
-            except Exception as e_send:
-                 logging.error(f"Ошибка отправки части {i+1} контекста: {e_send}")
-                 await message.answer(f"❌ Не удалось отправить часть {i+1}.")
-                 break
-
-# --- ОБРАБОТЧИКИ СООБЩЕНИЙ (Корректная буферизация) ---
-
-@dp.business_message()
-async def handle_business_message(message: aiogram_types.Message):
-    """Обрабатывает входящее бизнес-сообщение: менеджер или клиент."""
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    user_input = message.text or "" # Используем пустую строку если текста нет
-    business_connection_id = message.business_connection_id
-    log_prefix = f"handle_business_message(user:{user_id}, chat:{chat_id}):"
-    logging.debug(f"{log_prefix} Вход")
-
-    # --- Логика определения менеджера ---
-    is_from_manager = message.from_user.id in MANAGER_USER_IDS or message.from_user.id == ADMIN_USER_ID
-    # ---
-
-    if is_from_manager:
-        # Проверяем, является ли отправитель администратором
-        if message.from_user.id == ADMIN_USER_ID:
-            logging.info(f"{log_prefix} Сообщение от АДМИНИСТРАТОРА. Режим молчания НЕ включается.")
-            # Не включаем режим молчания и не выходим, позволяем обработке продолжиться ниже
-            pass # Просто продолжаем выполнение кода для обработки как сообщение клиента
-        else:
-            # Это сообщение от МЕНЕДЖЕРА (не админа)
-            logging.info(f"{log_prefix} Сообщение от МЕНЕДЖЕРА. Проверяем команды.")
-            try:
-                # Обработка команды /speak от менеджера
-                if user_input.lower() in ["speak", "/speak"]:
-                    if await is_chat_silent(chat_id):
-                        logging.info(f"{log_prefix} Менеджер активировал бота командой '{user_input}'.")
-                        await set_chat_silence(chat_id, False)
-                    else:
-                        logging.info(f"{log_prefix} Бот уже активен, команда '{user_input}' проигнорирована.")
-                    # Отправляем звездочку в любом случае, чтобы показать, что команда получена
-                    try: 
-                        await message.answer("*")
-                    except Exception as e:
-                        logging.debug(f"Не удалось отправить подтверждение: {e}")
-                    return # Завершаем обработку команды активации
-                
-                # Любое другое сообщение от менеджера включает режим молчания
-                logging.info(f"{log_prefix} Сообщение от менеджера (не /speak). Включаем/продлеваем режим молчания.")
-                await set_chat_silence(chat_id, True) # Включает или обновляет таймер
-                # Бот не отвечает на другие сообщения менеджеров
-                return
-            except Exception as manager_error:
-                logging.error(f"{log_prefix} Ошибка при обработке сообщения от менеджера: {manager_error}", exc_info=True)
-                return # Не продолжаем обработку в случае ошибки
-
-    # --- Обработка сообщения от КЛИЕНТА (или АДМИНА в бизнес-чате) ---
-    try:
-        # Проверяем режим молчания
-        if await is_chat_silent(chat_id):
-            logging.info(f"{log_prefix} Бот в режиме молчания, сообщение клиента игнорируется.")
-            return
-
-        # Игнорируем пустые сообщения от клиента
-        if not user_input.strip():
-             logging.info(f"{log_prefix} Пустое сообщение от клиента, игнорируем.")
-             return
-
-        # Логика буферизации
-        logging.debug(f"{log_prefix} Добавление бизнес-сообщения в буфер.")
-        pending_messages.setdefault(user_id, []).append(user_input)
-        logging.debug(f"{log_prefix} Текущий буфер: {pending_messages.get(user_id, [])}")
-
-        # Отменяем старый таймер, если он есть и активен
-        if user_id in user_message_timers:
-            old_timer = user_message_timers.pop(user_id) # Удаляем сразу
-            if not old_timer.done():
-                try:
-                    old_timer.cancel()
-                    logging.debug(f"{log_prefix} Предыдущий бизнес-таймер отменен.")
-                except Exception as e_cancel:
-                    logging.warning(f"{log_prefix} Не удалось отменить старый бизнес-таймер: {e_cancel}")
-
-        # Запускаем новый таймер
-        logging.debug(f"{log_prefix} Запуск нового бизнес-таймера ({MESSAGE_BUFFER_SECONDS} сек).")
-        new_timer_task = asyncio.create_task(
-            schedule_buffered_processing(user_id, chat_id, business_connection_id) # Передаем ID
-        )
-        user_message_timers[user_id] = new_timer_task
-        logging.debug(f"{log_prefix} Новый бизнес-таймер сохранен.")
-
-    except Exception as client_error:
-        # Эта ошибка ловится до вызова асинхронных операций буферизации
-        logging.error(f"{log_prefix} Ошибка при начальной обработке сообщения клиента: {client_error}", exc_info=True)
-
-@router.message(F.business_connection_id.is_(None))
-async def handle_message(message: aiogram_types.Message):
-    """Обрабатывает входящее обычное (не бизнес) сообщение пользователя."""
-    user_id = message.from_user.id
-    user_input = message.text or "" # Используем пустую строку если текста нет
-    chat_id = message.chat.id
-    log_prefix = f"handle_message(user:{user_id}, chat:{chat_id}):"
-    logging.debug(f"{log_prefix} Вход")
-
-    # Игнорируем пустые сообщения
-    if not user_input.strip():
-        logging.info(f"{log_prefix} Пустое сообщение, игнорируем.")
-        return
-
-    # Логика буферизации (аналогично бизнес-чатам, но без business_connection_id)
-    logging.debug(f"{log_prefix} Добавление сообщения в буфер.")
-    pending_messages.setdefault(user_id, []).append(user_input)
-    logging.debug(f"{log_prefix} Текущий буфер: {pending_messages.get(user_id, [])}")
-
-    # Отменяем старый таймер, если он есть и активен
-    if user_id in user_message_timers:
-        old_timer = user_message_timers.pop(user_id) # Удаляем сразу
-        if not old_timer.done():
-             try:
-                 old_timer.cancel()
-                 logging.debug(f"{log_prefix} Предыдущий таймер отменен.")
-             except Exception as e_cancel:
-                 logging.warning(f"{log_prefix} Не удалось отменить старый таймер: {e_cancel}")
-
-    # Запускаем новый таймер
-    logging.debug(f"{log_prefix} Запуск нового таймера ({MESSAGE_BUFFER_SECONDS} сек).")
-    new_timer_task = asyncio.create_task(
-        schedule_buffered_processing(user_id, chat_id, None) # business_connection_id is None
-    )
-    user_message_timers[user_id] = new_timer_task
-    logging.debug(f"{log_prefix} Новый таймер сохранен.")
-
-# --- Удаляем старые/ошибочные функции --- 
-# async def process_user_message_queue(user_id):
-#    ...
-# async def handle_message_timer(user_id, chat_id):
-#    ...
-
-# --- ОСТАЛЬНЫЕ ФУНКЦИИ (periodic_cleanup, save/get_vector_db_creation_time, log_context, main, PID, signal_handler) ---
-
-async def periodic_cleanup():
-    """Запускает периодическую очистку логов контекста"""
-    while True:
-        try:
-            await cleanup_old_context_logs()
-            logging.info("periodic_cleanup: Выполнена очистка старых логов контекста.")
-            await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-             logging.info("periodic_cleanup: Задача очистки логов отменена.")
-             break
-        except Exception as e:
-            logging.error(f"periodic_cleanup: Ошибка: {str(e)}", exc_info=True)
-            await asyncio.sleep(300)
-
-async def cleanup_old_context_logs():
-    """Удаляет логи контекста, которые старше 24 часов"""
-    try:
-        current_time = time.time()
-        one_day_ago = current_time - 86400
-        log_files = glob.glob(os.path.join(LOGS_DIR, "context_log_*_*.txt"))
-        count = 0
-        for log_file in log_files:
-            try:
-                file_mod_time = os.path.getmtime(log_file)
-                if file_mod_time < one_day_ago:
-                    os.remove(log_file)
-                    count += 1
-            except OSError as e:
-                 logging.warning(f"Не удалось удалить старый лог {log_file}: {e}")
-        if count > 0:
-            logging.info(f"cleanup_old_context_logs: Удалено {count} устаревших файлов контекста.")
-        else:
-            logging.debug("cleanup_old_context_logs: Устаревшие файлы контекста не найдены.")
-    except Exception as e:
-        logging.error(f"cleanup_old_context_logs: Ошибка при очистке логов: {str(e)}")
-
-def save_vector_db_creation_time():
-    """Сохраняет текущее время как время создания/обновления векторной базы данных"""
-    persist_directory = "./local_vector_db"
-    timestamp_file = os.path.join(persist_directory, "last_update.txt")
-    try:
-        os.makedirs(persist_directory, exist_ok=True)
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(timestamp_file, "w") as f:
-            f.write(current_time)
-        logging.info(f"Сохранено время обновления базы: {current_time} в {timestamp_file}")
-        return True
-    except Exception as e:
-        logging.error(f"Ошибка при сохранении времени обновления базы в {timestamp_file}: {str(e)}")
-        return False
-
-def get_vector_db_creation_time():
-    """Получает время создания/обновления векторной базы данных из файла или по модификации."""
-    persist_directory = "./local_vector_db"
-    timestamp_file = os.path.join(persist_directory, "last_update.txt")
-    db_time = None
-    if os.path.exists(timestamp_file):
-        try:
-            with open(timestamp_file, "r") as f:
-                time_str = f.read().strip()
-                db_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-                logging.debug(f"Время обновления базы из файла: {db_time}")
-                return db_time
-        except Exception as file_err:
-            logging.warning(f"Ошибка чтения файла времени ({timestamp_file}): {str(file_err)}")
-    logging.debug("Файл времени не найден/ошибка, проверяем модификацию файлов...")
-    if os.path.exists(persist_directory) and os.path.isdir(persist_directory):
-        try:
-            files = [os.path.join(persist_directory, f) for f in os.listdir(persist_directory)
-                     if os.path.isfile(os.path.join(persist_directory, f))]
-            if files:
-                latest_time_ts = max(os.path.getmtime(f) for f in files)
-                db_time = datetime.fromtimestamp(latest_time_ts)
-                logging.debug(f"Время обновления базы по модификации: {db_time}")
-                return db_time
-            else:
-                 logging.warning(f"Директория {persist_directory} пуста.")
-        except Exception as mod_err:
-            logging.error(f"Ошибка получения времени модификации {persist_directory}: {str(mod_err)}")
-    else:
-        logging.warning(f"Директория базы {persist_directory} не существует.")
-    if db_time is None:
-        logging.warning("Не удалось определить время обновления базы.")
-    return db_time
-
-async def log_context(user_id, query, context):
-    """Логирует запрос и контекст в отдельный файл"""
-    try:
-        timestamp = int(time.time())
-        filename = f"context_log_{user_id}_{timestamp}.txt"
-        filepath = os.path.join(LOGS_DIR, filename)
-        os.makedirs(LOGS_DIR, exist_ok=True)
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"User ID: {user_id}\n")
-            f.write(f"Запрос:\n{query}\n\n")
-            f.write(f"Найденный контекст:\n{context}\n")
-        logging.debug(f"Контекст для user_id {user_id} сохранен в {filepath}")
-    except Exception as e:
-        logging.error(f"Ошибка логирования контекста для user_id {user_id}: {str(e)}")
-
-# --- НОВАЯ ФУНКЦИЯ ДЛЯ ОТЧЕТА АДМИНУ ---
-async def notify_admin_of_update_result(update_result: dict):
-    """Отправляет отчет о результатах обновления базы администратору."""
-    log_prefix = "notify_admin_of_update_result:"
-    if not ADMIN_USER_ID:
-        logging.warning(f"{log_prefix} ADMIN_USER_ID не установлен. Невозможно отправить отчет.")
-        return
-
-    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        if update_result.get('success'):
-            message_text = (
-                f"✅ Ежедневное обновление базы знаний УСПЕШНО завершено!\n"
-                f"🕒 Время: {current_time_str}\n"
-                f"➕ Добавлено новых чанков: {update_result.get('added_chunks', 'N/A')}\n"
-                f"📊 Всего чанков в базе: {update_result.get('total_chunks', 'N/A')}"
-            )
-            if 'warning' in update_result:
-                message_text += f"\n⚠️ Предупреждение: {update_result['warning']}"
-            log_level = logging.INFO
-        else:
-            error_details = update_result.get('error', 'Подробности в основных логах.')
-            message_text = (
-                 f"❌ ОШИБКА ежедневного обновления базы знаний!\n"
-                 f"🕒 Время: {current_time_str}\n"
-                 f"Детали ошибки: {error_details}"
-            )
-            log_level = logging.ERROR
-        
-        logging.log(log_level, f"{log_prefix} {message_text}") # Логируем сам отчет
-        await bot.send_message(ADMIN_USER_ID, message_text)
-        logging.info(f"{log_prefix} Отчет об обновлении отправлен администратору (ID: {ADMIN_USER_ID}).")
-
-    except Exception as e:
-        logging.error(f"{log_prefix} Ошибка при отправке отчета администратору: {e}", exc_info=True)
-
-# --- НОВАЯ/ВОССТАНОВЛЕННАЯ ФУНКЦИЯ ---
+# --- OpenAI Assistant Interaction ---
 async def chat_with_assistant(user_id: int, user_input: str) -> str:
-    """
-    Отправляет запрос ассистенту OpenAI и возвращает его ответ,
-    предварительно попытавшись найти и добавить контекст из локальной базы знаний.
-    """
     log_prefix = f"chat_with_assistant(user:{user_id}):"
-    logging.info(f"{log_prefix} Начало обработки запроса: {user_input[:100]}...")
-    
-    final_input_to_openai = user_input # По умолчанию отправляем оригинальный запрос
+    logger.info(f"{log_prefix} Запрос: {user_input[:100]}...")
 
-    # --- НАЧАЛО: Получение контекста из локальной базы ---
-    if USE_VECTOR_STORE: 
-        logging.debug(f"{log_prefix} Попытка получить локальный контекст для запроса (k=5)...")
-        try:
-            # Изменяем k на 5
-            local_context = await get_relevant_context(user_input, k=5)
-            if local_context:
-                logging.info(f"{log_prefix} Найден локальный контекст (k=5): {local_context[:200]}...")
-                # Изменяем формулировку инструкции
-                final_input_to_openai = (
-                    f"Отвечай ТОЛЬКО на основе этого контекста из базы знаний:\n"
-                    f"--- НАЧАЛО КОНТЕКСТА ---\n{local_context}\n--- КОНЕЦ КОНТЕКСТА ---\n\n"
-                    f"Вопрос пользователя:\n{user_input}"
-                )
-                logging.debug(f"{log_prefix} Сформирован расширенный запрос для OpenAI (начало): {final_input_to_openai[:150]}... (контекст добавлен)")
-                await log_context(user_id, user_input, local_context)
-            else:
-                logging.info(f"{log_prefix} Локальный контекст не найден (k=5). Используется оригинальный запрос.")
-                await log_context(user_id, user_input, "ЛОКАЛЬНЫЙ КОНТЕКСТ НЕ НАЙДЕН (k=5)")
-        except Exception as e_context:
-            logging.error(f"{log_prefix} Ошибка при получении локального контекста (k=5): {e_context}. Используется оригинальный запрос.")
-            await log_context(user_id, user_input, f"ОШИБКА ПОЛУЧЕНИЯ КОНТЕКСТА (k=5): {e_context}")
+    thread_id = await get_or_create_thread(user_id)
+    if not thread_id:
+        return "Произошла внутренняя ошибка (не удалось создать или получить тред OpenAI)."
+
+    context = ""
+    if USE_VECTOR_STORE and vector_collection:
+        try: context = await get_relevant_context_telegram(user_input, k=RELEVANT_CONTEXT_COUNT)
+        except Exception as e_ctx: logger.error(f"{log_prefix} Ошибка получения контекста: {e_ctx}", exc_info=True)
+
+    full_prompt = user_input
+    if context:
+        full_prompt = (
+            f"Используй следующую информацию из базы знаний для ответа:\n"
+            f"--- НАЧАЛО КОНТЕКСТА ---\n{context}\n--- КОНЕЦ КОНТЕКСТА ---\n\n"
+            f"Вопрос пользователя: {user_input}"
+        )
+        logger.info(f"{log_prefix} Контекст добавлен к запросу.")
     else:
-        logging.debug(f"{log_prefix} Использование векторной базы отключено (USE_VECTOR_STORE=False). Используется оригинальный запрос.")
-    # --- КОНЕЦ: Получение контекста ---
+        logger.info(f"{log_prefix} Контекст не найден или база знаний отключена.")
+
+    await add_message_to_history(user_id, "user", user_input) 
 
     try:
-        await add_message_to_history(user_id, "user", user_input)
+        logger.debug(f"{log_prefix} Проверка активных runs для треда {thread_id}...")
+        active_runs_response = await openai_client.beta.threads.runs.list(thread_id=thread_id)
+        active_runs_to_cancel = [run for run in active_runs_response.data if run.status in ['queued', 'in_progress', 'requires_action']]
+        if active_runs_to_cancel:
+            logger.warning(f"{log_prefix} Найдено {len(active_runs_to_cancel)} активных/ожидающих runs. Отменяем...")
+            for run_to_cancel in active_runs_to_cancel:
+                try:
+                    await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run_to_cancel.id)
+                    logger.info(f"{log_prefix} Отменен run {run_to_cancel.id}")
+                except Exception as cancel_error: logger.warning(f"{log_prefix} Не удалось отменить run {run_to_cancel.id}: {cancel_error}")
+        
+        await openai_client.beta.threads.messages.create(thread_id=thread_id, role="user", content=full_prompt)
+        logger.info(f"{log_prefix} Сообщение добавлено в тред {thread_id}")
 
-        client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        thread_id = await get_or_create_thread(user_id) 
-        logging.debug(f"{log_prefix} Используется тред ID: {thread_id}")
-
-        logging.debug(f"{log_prefix} Добавление СООБЩЕНИЯ (возможно, расширенного) в тред OpenAI...")
-        client.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=final_input_to_openai
-        )
-        logging.debug(f"{log_prefix} Сообщение добавлено в тред OpenAI.")
-
-        logging.debug(f"{log_prefix} Запуск выполнения треда с ASSISTANT_ID: {ASSISTANT_ID}...")
-        run = client.beta.threads.runs.create(
-            thread_id=thread_id,
-            assistant_id=ASSISTANT_ID
-        )
-        logging.debug(f"{log_prefix} Тред запущен, ID выполнения: {run.id}")
+        current_run = await openai_client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
+        logger.info(f"{log_prefix} Запущен новый run {current_run.id}")
 
         start_time = time.time()
-        timeout_seconds = 90
-        while run.status in ["queued", "in_progress", "cancelling"]:
-             await asyncio.sleep(1.5) 
-             run = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-             logging.debug(f"{log_prefix} Статус выполнения: {run.status}")
-             if time.time() - start_time > timeout_seconds:
-                 logging.error(f"{log_prefix} Таймаут ожидания ответа от ассистента (run_id: {run.id}).")
-                 try:
-                     client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run.id)
-                     logging.info(f"{log_prefix} Попытка отмены выполнения {run.id} отправлена.")
-                 except Exception as e_cancel:
-                     logging.error(f"{log_prefix} Ошибка при попытке отмены выполнения {run.id}: {e_cancel}")
-                 return "Извините, ассистент долго не отвечает. Пожалуйста, попробуйте позже."
+        run_completed_successfully = False
+        while time.time() - start_time < OPENAI_RUN_TIMEOUT_SECONDS:
+            await asyncio.sleep(1.5) 
+            run_status = await openai_client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=current_run.id)
+            logger.debug(f"{log_prefix} Статус run {current_run.id}: {run_status.status}")
+            if run_status.status == 'completed':
+                logger.info(f"{log_prefix} Run {current_run.id} успешно завершен.")
+                run_completed_successfully = True
+                break
+            elif run_status.status in ['failed', 'cancelled', 'expired']:
+                error_message_detail = f"Run {current_run.id} статус '{run_status.status}'."
+                last_error = getattr(run_status, 'last_error', None)
+                if last_error: error_message_detail += f" Ошибка: {last_error.message} (Код: {last_error.code})"
+                logger.error(f"{log_prefix} {error_message_detail}")
+                await log_context_telegram(user_id, user_input, context, f"ОШИБКА OPENAI: {error_message_detail}")
+                return "Произошла ошибка при обработке вашего запроса (статус OpenAI)."
+            elif run_status.status == 'requires_action':
+                 logger.warning(f"{log_prefix} Run {current_run.id} требует действия (Function Calling?).")
+                 await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=current_run.id)
+                 await log_context_telegram(user_id, user_input, context, "ОШИБКА OPENAI: requires_action")
+                 return "Внутренняя ошибка обработки (OpenAI requires_action)."
+        
+        if not run_completed_successfully: # Таймаут
+            logger.warning(f"{log_prefix} Таймаут ({OPENAI_RUN_TIMEOUT_SECONDS}s) для run {current_run.id}")
+            try:
+                await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=current_run.id)
+                logger.info(f"{log_prefix} Отменен run {current_run.id} из-за таймаута.")
+            except Exception as cancel_error: logger.warning(f"{log_prefix} Ошибка отмены run {current_run.id} после таймаута: {cancel_error}")
+            await log_context_telegram(user_id, user_input, context, "ОШИБКА OPENAI: Таймаут")
+            return "Внутренняя ошибка обработки (таймаут OpenAI)."
 
-        if run.status == "completed":
-            logging.debug(f"{log_prefix} Выполнение завершено успешно.")
-            messages_response = client.beta.threads.messages.list(thread_id=thread_id, order="desc", limit=5)
+        messages_response = await openai_client.beta.threads.messages.list(thread_id=thread_id, order="desc", limit=5)
+        assistant_response_content = None
+        for msg in messages_response.data:
+            if msg.role == "assistant" and msg.run_id == current_run.id:
+                if msg.content and msg.content[0].type == 'text': # Предполагаем один текстовый блок
+                    assistant_response_content = msg.content[0].text.value
+                    logger.info(f"{log_prefix} Получен релевантный ответ: {assistant_response_content[:100]}...")
+                    break
+        
+        if assistant_response_content:
+            await add_message_to_history(user_id, "assistant", assistant_response_content)
+            await log_context_telegram(user_id, user_input, context, assistant_response_content)
+            return assistant_response_content
+        else:
+            logger.warning(f"{log_prefix} Текстовый ответ от ассистента для run {current_run.id} не найден.")
+            await log_context_telegram(user_id, user_input, context, "ОТВЕТ АССИСТЕНТА НЕ НАЙДЕН ИЛИ ПУСТ")
+            return "Не удалось получить ответ от ассистента."
+
+    except openai.APIError as e: # Более общая ошибка API OpenAI
+        logger.error(f"{log_prefix} Ошибка OpenAI API: {e}", exc_info=True)
+        return f"Ошибка OpenAI: {str(e)}. Попробуйте позже."
+    except Exception as e:
+        logger.error(f"{log_prefix} Непредвиденная ошибка: {e}", exc_info=True)
+        await log_context_telegram(user_id, user_input, context, f"НЕПРЕДВИДЕННАЯ ОШИБКА: {e}")
+        return "Произошла внутренняя ошибка."
+
+# --- Vector Store Management (ChromaDB) ---
+async def get_relevant_context_telegram(query: str, k: int) -> str:
+    if not vector_collection:
+        logger.warning("Запрос контекста (TG), но vector_collection не инициализирована.")
+        return ""
+    try:
+        try:
+            query_embedding_response = await openai_client.embeddings.create(
+                 input=[query], model=OPENAI_EMBEDDING_MODEL, dimensions=OPENAI_EMBEDDING_DIMENSIONS
+            )
+            query_embedding = query_embedding_response.data[0].embedding
+            logger.debug(f"Эмбеддинг для запроса (TG) '{query[:50]}...' создан.")
+        except Exception as e_embed:
+            logger.error(f"Ошибка создания эмбеддинга (TG): {e_embed}", exc_info=True)
+            return ""
+
+        def _query_chroma():
+            return vector_collection.query(query_embeddings=[query_embedding], n_results=k, include=["documents", "metadatas"]) # Убрали distances для упрощения
+        results = await asyncio.to_thread(_query_chroma)
+        logger.debug(f"Поиск в ChromaDB (TG) для '{query[:50]}...' выполнен.")
+
+        if not results or not results.get("ids") or not results["ids"][0] or \
+           not results.get("documents") or not results["documents"][0]:
+            logger.info(f"Релевантных документов (TG) не найдено для: '{query[:50]}...'")
+            return ""
+
+        documents = results["documents"][0]
+        metadatas = results["metadatas"][0] if results.get("metadatas") and results["metadatas"][0] else [{}] * len(documents)
+        context_pieces = []
+        logger.info(f"Найдено {len(documents)} док-в (TG) для '{query[:50]}...'. Топ {k}:")
+        for i, doc_content in enumerate(documents):
+            meta = metadatas[i] if i < len(metadatas) else {}
+            source = meta.get('source', 'Неизвестный источник')
+            logger.info(f"  #{i+1} (TG): Источник='{source}', Контент='{doc_content[:100]}...'")
+            context_pieces.append(f"Из документа '{source}':\n{doc_content}")
+
+        if not context_pieces: return ""
+        return "\n\n---\n\n".join(context_pieces)
+    except Exception as e:
+        logger.error(f"Непредвиденная ошибка при получении контекста (TG): {e}", exc_info=True)
+        return ""
+
+async def update_vector_store_telegram(chat_id_to_notify: Optional[int] = None) -> Dict[str, Any]:
+    logger.info("--- Запуск обновления базы знаний (TG) ---")
+    os.makedirs(VECTOR_DB_BASE_PATH, exist_ok=True)
+    timestamp_dir_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_new_tg"
+    new_db_subpath = timestamp_dir_name 
+    new_db_full_path = os.path.join(VECTOR_DB_BASE_PATH, new_db_subpath)
+    logger.info(f"Новая директория для БД (TG): {new_db_full_path}")
+
+    previous_active_full_path = _get_active_db_full_path_telegram() 
+
+    try:
+        os.makedirs(new_db_full_path, exist_ok=True)
+    except Exception as e_mkdir:
+        logger.error(f"Не удалось создать директорию '{new_db_full_path}' (TG): {e_mkdir}.", exc_info=True)
+        return {"success": False, "error": f"Failed to create temp dir: {e_mkdir}", "added_chunks": 0, "total_chunks": 0}
+
+    temp_vector_collection: Optional[chromadb.api.models.Collection.Collection] = None
+    try:
+        def _init_temp_chroma():
+            temp_chroma_client = chromadb.PersistentClient(path=new_db_full_path)
+            return temp_chroma_client.get_or_create_collection(name=CHROMA_COLLECTION_NAME)
+        temp_vector_collection = await asyncio.to_thread(_init_temp_chroma)
+        logger.info(f"Временная коллекция '{CHROMA_COLLECTION_NAME}' (TG) создана/получена в '{new_db_full_path}'.")
+
+        logger.info("Получение данных из Google Drive (TG)...")
+        documents_data = await asyncio.to_thread(read_data_from_drive_sync)
+        if not documents_data:
+            logger.warning("Документы в Google Drive (TG) не найдены. Обновление отменено.")
+            if os.path.exists(new_db_full_path):
+                await asyncio.to_thread(shutil.rmtree, new_db_full_path)
+            return {"success": False, "error": "No documents in Google Drive", "added_chunks": 0, "total_chunks": 0}
+        
+        logger.info(f"Получено {len(documents_data)} документов из Google Drive (TG).")
+        all_texts, all_metadatas = [], []
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=[("#", "h1"), ("##", "h2"), ("###", "h3")])
+        MD_SECTION_MAX_LEN = 2000 
+
+        for doc_info in documents_data:
+            doc_name, doc_content_str = doc_info['name'], doc_info['content']
+            if not doc_content_str or not doc_content_str.strip():
+                logger.warning(f"Документ '{doc_name}' (TG) пуст.")
+                continue
             
-            assistant_messages = [msg for msg in messages_response.data if msg.role == "assistant"]
-
-            if assistant_messages and assistant_messages[0].content:
-                response_text_parts = []
-                for content_block in assistant_messages[0].content:
-                    if content_block.type == "text":
-                        response_text_parts.append(content_block.text.value)
+            enhanced_doc_content = f"Документ: {doc_name}\n\n{doc_content_str}" # ИСПРАВЛЕНО \n
+            chunk_idx = 0
+            is_md = doc_name.lower().endswith(('.md', '.markdown'))
+            try:
+                target_splits = markdown_splitter.split_text(enhanced_doc_content) if is_md else text_splitter.split_text(enhanced_doc_content)
                 
-                if response_text_parts:
-                    final_response = "\\n".join(response_text_parts).strip()
-                    if not final_response:
-                         logging.warning(f"{log_prefix} Ассистент ответил, но текст после обработки пустой.")
-                         return "Ассистент дал пустой ответ. Попробуйте переформулировать запрос."
-                    logging.info(f"{log_prefix} Получен ответ от ассистента: {final_response[:200]}...")
-                    await add_message_to_history(user_id, "assistant", final_response) # add_message_to_history остается async
-                    return final_response
-                else:
-                    logging.warning(f"{log_prefix} Ассистент ответил, но текстовое содержимое (text parts) пустое.")
-                    return "Ассистент дал пустой ответ. Попробуйте переформулировать запрос."
-            else:
-                logging.warning(f"{log_prefix} Выполнение завершено, но сообщения от ассистента не найдены или их контент пуст.")
-                return "Не удалось получить ответ от ассистента после выполнения."
+                for item_split in target_splits:
+                    page_content = item_split.page_content if isinstance(item_split, Document) else item_split
+                    current_metadata = item_split.metadata if isinstance(item_split, Document) else {}
+                    
+                    if is_md and len(page_content) > MD_SECTION_MAX_LEN and not isinstance(item_split, Document): # Дополнительная проверка для MD без Document
+                        sub_chunks = text_splitter.split_text(page_content)
+                        for sub_chunk_text in sub_chunks:
+                            all_texts.append(sub_chunk_text)
+                            all_metadatas.append({"source": doc_name, **current_metadata, "type": "md_split", "chunk": chunk_idx})
+                            chunk_idx += 1
+                    elif isinstance(item_split, Document) and len(page_content) > MD_SECTION_MAX_LEN : # Если это Document и длинный
+                        sub_chunks = text_splitter.split_text(page_content)
+                        for sub_chunk_text in sub_chunks:
+                            all_texts.append(sub_chunk_text)
+                            all_metadatas.append({"source": doc_name, **current_metadata, "type": "doc_split", "chunk": chunk_idx}) # type: doc_split
+                            chunk_idx +=1
+                    else:
+                        all_texts.append(page_content)
+                        all_metadatas.append({"source": doc_name, **current_metadata, "type": "md" if is_md else "text", "chunk": chunk_idx})
+                        chunk_idx += 1
+                logger.info(f"Документ '{doc_name}' (TG) разбит на {chunk_idx} чанков.")
+            except Exception as e_split:
+                logger.error(f"Ошибка разбиения '{doc_name}' (TG): {e_split}", exc_info=True)
+                try: # Fallback
+                    chunks = text_splitter.split_text(enhanced_doc_content)
+                    chunk_idx_fb = 0 
+                    for chunk_text in chunks:
+                        all_texts.append(chunk_text)
+                        all_metadatas.append({"source": doc_name, "type": "text_fallback", "chunk": chunk_idx_fb})
+                        chunk_idx_fb += 1
+                    logger.info(f"Документ '{doc_name}' (TG) (fallback) разбит на {chunk_idx_fb} чанков.")
+                except Exception as e_fallback: logger.error(f"Ошибка fallback-разбиения '{doc_name}' (TG): {e_fallback}", exc_info=True)
         
-        elif run.status == "requires_action":
-            logging.warning(f"{log_prefix} Выполнение требует действий (например, Function Calling), что не обрабатывается: run_id {run.id}")
-            return "Ассистент запросил дополнительные действия, которые пока не поддерживаются. Пожалуйста, упростите запрос."
+        if not all_texts:
+            logger.warning("Нет текстовых данных для добавления в базу (TG).")
+            if os.path.exists(new_db_full_path):
+                await asyncio.to_thread(shutil.rmtree, new_db_full_path)
+            return {"success": False, "error": "No text data to add", "added_chunks": 0, "total_chunks": 0}
 
-        elif run.status == "failed":
-            logging.error(f"{log_prefix} Выполнение треда завершилось с ошибкой: {run.last_error}. Run ID: {run.id}")
-            error_message = f"Код: {run.last_error.code}. Сообщение: {run.last_error.message}" if run.last_error else "Неизвестная ошибка выполнения OpenAI."
-            return f"Извините, произошла ошибка при обработке вашего запроса на стороне OpenAI. ({error_message})"
+        logger.info(f"Создание эмбеддингов для {len(all_texts)} чанков (TG)...")
+        embeddings_response = await openai_client.embeddings.create(
+            input=all_texts, model=OPENAI_EMBEDDING_MODEL, dimensions=OPENAI_EMBEDDING_DIMENSIONS
+        )
+        all_embeddings = [item.embedding for item in embeddings_response.data]
+        all_ids = [f"{meta['source']}_{meta.get('type','unk')}_{meta['chunk']}_{i}" for i, meta in enumerate(all_metadatas)] # Упрощенные ID
+
+        if temp_vector_collection:
+            def _add_to_chroma():
+                temp_vector_collection.add(ids=all_ids, embeddings=all_embeddings, metadatas=all_metadatas, documents=all_texts)
+                return temp_vector_collection.count()
+            final_total = await asyncio.to_thread(_add_to_chroma)
+            final_added = len(all_ids)
+            logger.info(f"Успешно добавлено {final_added} чанков (TG). Всего: {final_total}.")
+        else: # Не должно случиться
+            logger.error("temp_vector_collection (TG) не инициализирована!")
+            if os.path.exists(new_db_full_path):
+                await asyncio.to_thread(shutil.rmtree, new_db_full_path)
+            return {"success": False, "error": "temp_vector_collection is None", "added_chunks": 0, "total_chunks": 0}
+
+        active_db_info_filepath = os.path.join(VECTOR_DB_BASE_PATH, ACTIVE_DB_INFO_FILE)
+        with open(active_db_info_filepath, "w", encoding="utf-8") as f: f.write(new_db_full_path) # Сохраняем ПОЛНЫЙ путь
+        logger.info(f"Полный путь к новой активной базе (TG) '{new_db_full_path}' сохранен в '{active_db_info_filepath}'.")
+
+        await _initialize_active_vector_collection_telegram()
+        if not vector_collection:
+             logger.error("Критическая ошибка (TG): не удалось перезагрузить vector_collection!")
+             return {"success": False, "error": "Failed to reload global vector_collection", "added_chunks": final_added, "total_chunks": final_total}
         
-        else: 
-            logging.warning(f"{log_prefix} Выполнение треда завершилось со статусом: {run.status}. Run ID: {run.id}")
-            return f"Обработка вашего запроса была прервана или завершилась с неожиданным статусом ({run.status}). Пожалуйста, попробуйте снова."
+        if previous_active_full_path and previous_active_full_path != new_db_full_path and os.path.exists(previous_active_full_path):
+            try:
+                await asyncio.to_thread(shutil.rmtree, previous_active_full_path)
+                logger.info(f"Удалена предыдущая директория БД (TG): '{previous_active_full_path}'")
+            except Exception as e_rm_old: logger.error(f"Не удалось удалить предыдущую БД (TG) '{previous_active_full_path}': {e_rm_old}", exc_info=True)
+        
+        logger.info("--- Обновление базы знаний (TG) успешно завершено ---")
+        return {"success": True, "added_chunks": final_added, "total_chunks": final_total, "new_active_path": new_db_full_path}
 
-    except openai.APIConnectionError as e:
-        logging.error(f"{log_prefix} Ошибка соединения с OpenAI API: {e}", exc_info=True)
-        return "Не удалось подключиться к OpenAI. Проверьте ваше интернет-соединение или статус OpenAI."
-    except openai.RateLimitError as e:
-        logging.error(f"{log_prefix} Превышен лимит запросов к OpenAI API: {e}", exc_info=True)
-        return "Слишком много запросов к OpenAI. Пожалуйста, подождите некоторое время."
-    except openai.AuthenticationError as e:
-        logging.error(f"{log_prefix} Ошибка аутентификации OpenAI API: {e}. Проверьте ваш API ключ.", exc_info=True)
-        return "Ошибка аутентификации с OpenAI. Обратитесь к администратору."
-    except openai.APIError as e: 
-        logging.error(f"{log_prefix} Общая ошибка OpenAI API: {e}", exc_info=True)
-        return f"Произошла ошибка при обращении к OpenAI: {e}. Пожалуйста, попробуйте позже."
-    except Exception as e:
-        logging.error(f"{log_prefix} Непредвиденная ошибка в chat_with_assistant: {e}", exc_info=True)
-        return "Произошла внутренняя ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже."
+    except openai.APIError as e_openai:
+         logger.error(f"OpenAI API ошибка (TG): {e_openai}", exc_info=True)
+         if os.path.exists(new_db_full_path):
+             await asyncio.to_thread(shutil.rmtree, new_db_full_path)
+         return {"success": False, "error": f"OpenAI API error: {e_openai}", "added_chunks": 0, "total_chunks": 0}
+    except Exception as e_main_update:
+        logger.error(f"Критическая ошибка обновления БЗ (TG): {e_main_update}", exc_info=True)
+        if os.path.exists(new_db_full_path):
+            await asyncio.to_thread(shutil.rmtree, new_db_full_path)
+        return {"success": False, "error": f"Critical update error: {e_main_update}", "added_chunks": 0, "total_chunks": 0}
 
+# --- Telegram Command Handlers ---
+@router.message(Command("start"))
+async def start_command(message: aiogram_types.Message):
+    await message.answer("👋 Здравствуйте! Обновляю базу знаний...")
+    asyncio.create_task(run_update_and_notify_telegram(message.chat.id))
 
+async def run_update_and_notify_telegram(chat_id: int):
+    logger.info(f"Обновление БЗ (TG) для чата {chat_id}...")
+    update_result = await update_vector_store_telegram(chat_id_to_notify=chat_id)
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    user_message = f"🔔 Отчет об обновлении БЗ ({current_time}):\n"
+    if update_result.get("success"):
+        user_message += (f"✅ Успешно!\n➕ Добавлено: {update_result.get('added_chunks', 'N/A')}\n"
+                         f"📊 Всего: {update_result.get('total_chunks', 'N/A')}\n")
+        if update_result.get("new_active_path"): user_message += f"📁 Путь: {os.path.basename(update_result['new_active_path'])}" # Показываем только имя папки
+    else:
+        user_message += f"❌ Ошибка: {update_result.get('error', 'N/A')}"
+    
+    try: await bot.send_message(chat_id, user_message)
+    except Exception as e: logger.error(f"Ошибка отправки уведомления пользователю {chat_id} (TG): {e}")
 
-async def main():
-    """Основная функция запуска бота."""
-    logging.info("🚀 Запуск бота...")
-    if not all([TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, ASSISTANT_ID, FOLDER_ID]):
-         logging.critical("КРИТИЧЕСКАЯ ОШИБКА: Отсутствуют переменные окружения.")
-         return
-    create_pid_file()
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    cleanup_task = None
-    daily_update_task = None # Инициализируем переменную
+    if ADMIN_USER_ID and chat_id != ADMIN_USER_ID: # Дублируем админу, если это не он инициировал
+        try: await bot.send_message(ADMIN_USER_ID, "[Авто] " + user_message)
+        except Exception as e: logger.error(f"Ошибка отправки уведомления админу (TG): {e}")
+
+@router.message(Command("update"))
+async def update_knowledge_command(message: aiogram_types.Message):
+    if message.from_user.id != ADMIN_USER_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    await message.answer("🔄 Обновляю базу знаний (TG)...")
+    asyncio.create_task(run_update_and_notify_telegram(ADMIN_USER_ID))
+
+@router.message(Command("reset"))
+async def reset_conversation_command(message: aiogram_types.Message):
+    user_id = message.from_user.id
+    logger.info(f"Команда /reset от user_id={user_id} (TG).")
+    
+    async with user_processing_locks[user_id]:
+        if user_id in pending_messages: del pending_messages[user_id]
+        if user_id in user_message_timers:
+            timer = user_message_timers.pop(user_id)
+            if not timer.done(): timer.cancel()
+        
+        thread_id = user_threads.pop(user_id, None)
+        if thread_id: logger.info(f"Тред {thread_id} для user_id={user_id} удален из памяти (TG).")
+        if user_id in user_messages: del user_messages[user_id]
+        
+    await message.answer("🔄 Диалог сброшен!")
+
+@router.message(Command("reset_all"))
+async def reset_all_command(message: aiogram_types.Message):
+    if message.from_user.id != ADMIN_USER_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    logger.warning(f"Админ {ADMIN_USER_ID} инициировал ПОЛНЫЙ СБРОС (TG)!")
+    # ... (логика отмены таймеров, очистки словарей user_threads, user_messages, pending_messages) ...
+    timers_cancelled = 0
+    for timer_task in list(user_message_timers.values()): # Iterate over a copy
+        if not timer_task.done():
+            timer_task.cancel()
+            timers_cancelled +=1
+    user_message_timers.clear()
+    pending_messages_cleared = len(pending_messages)
+    pending_messages.clear()
+    threads_cleared = len(user_threads)
+    user_threads.clear()
+    user_messages_cleared = len(user_messages)
+    user_messages.clear()
+
+    await message.answer(f"🔄 ВСЕ ДИАЛОГИ СБРОШЕНЫ (TG).\n"
+                         f"- Таймеров отменено: {timers_cancelled}\n"
+                         f"- Буферов очищено: {pending_messages_cleared}\n"
+                         f"- Тредов (память): {threads_cleared}\n"
+                         f"- Историй (память): {user_messages_cleared}")
+
+@router.message(Command("speak"))
+async def speak_command(message: aiogram_types.Message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    is_manager_or_admin = user_id == ADMIN_USER_ID or user_id in MANAGER_USER_IDS
+
+    if not is_manager_or_admin:
+        logger.debug(f"User {user_id} (не менеджер) попытался /speak в чате {chat_id}.")
+        return
+
+    if await is_chat_silent(chat_id):
+        await set_chat_silence_permanently(chat_id, False)
+        await message.answer("🤖 Режим молчания снят. Бот снова активен.")
+        logger.info(f"Менеджер/админ {user_id} снял молчание для чата {chat_id} (TG).")
+    else:
+        await message.answer("ℹ️ Бот уже был активен.")
+
+@router.message(Command("check_db"))
+async def check_database_command(message: aiogram_types.Message):
+    await message.answer("🔍 Проверяю активную базу векторов (TG)...")
+    active_db_full_path = _get_active_db_full_path_telegram()
+
+    if not active_db_full_path:
+        await message.answer("❌ Активная база знаний (TG) не определена.")
+        return
+
+    report = [f"✅ Активный путь БД (TG): {active_db_full_path}"]
     try:
-        logging.info("📁 Проверка Google Drive...")
-        try:
-             get_drive_service()
-             logging.info("✅ Google Drive доступен.")
-        except Exception as drive_err:
-             logging.critical(f"КРИТИЧЕСКАЯ ОШИБКА: Google Drive недоступен: {drive_err}. Остановка.")
-             return
-        logging.info("Запуск обновления базы в фоне при старте...")
-        asyncio.create_task(update_vector_store()) # Оставляем обновление при старте (без отчета)
-        dp.include_router(router)
-        # Запуск фоновых задач
-        cleanup_task = asyncio.create_task(periodic_cleanup()) 
-        daily_update_task = asyncio.create_task(daily_database_update()) # Запускаем ежедневное обновление
-        logging.info("🤖 Бот готов к работе")
-        logging.info(f"⏱️ Буферизация: {MESSAGE_BUFFER_SECONDS} сек")
-        await dp.start_polling(bot)
-    except asyncio.CancelledError:
-         logging.info("Основная задача бота отменена.")
-    except Exception as e:
-        logging.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА при работе бота: {str(e)}", exc_info=True)
-    finally:
-        logging.info("Остановка бота...")
-        # Отменяем фоновые задачи
-        if cleanup_task and not cleanup_task.done():
-            cleanup_task.cancel()
-            logging.info("Задача очистки логов отменена.")
-        if daily_update_task and not daily_update_task.done(): # Добавляем отмену для ежедневного обновления
-            daily_update_task.cancel()
-            logging.info("Задача ежедневного обновления базы отменена.")
-            
-        active_timers = list(user_message_timers.values())
-        if active_timers:
-             logging.info(f"Отмена {len(active_timers)} таймеров обработки...")
-             for timer_task in active_timers:
-                 timer_task.cancel()
-             await asyncio.sleep(1) # Даем время на отмену
-        try:
-             await bot.session.close()
-             logging.info("Сессия бота закрыта.")
-        except Exception as e_close:
-             logging.warning(f"Ошибка при закрытии сессии бота: {e_close}")
-        logging.info("Остановка завершена.")
-        remove_pid_files()
+        files = await asyncio.to_thread(os.listdir, active_db_full_path)
+        report.append(f"📄 Файлы в директории: {', '.join(files) if files else 'Пусто'}")
+    except Exception as e: report.append(f"❌ Ошибка чтения файлов: {e}")
 
-def create_pid_file():
-    """Создает PID файл для текущего процесса."""
-    pid = os.getpid()
-    pid_file_base = 'bot'
-    pid_file = f'{pid_file_base}.pid'
-    i = 1
-    while os.path.exists(pid_file):
-        i += 1
-        pid_file = f'{pid_file_base}_{i}.pid'
+    if vector_collection:
+        try:
+            count = await asyncio.to_thread(vector_collection.count)
+            report.append(f"📊 Кол-во записей (глоб.): {count}")
+        except Exception as e: report.append(f"⚠️ Ошибка доступа к глоб. коллекции: {e}")
+    else:
+        report.append("ℹ️ Глобальная vector_collection не инициализирована. Попытка прямого подключения...")
+        try:
+            def _direct_count():
+                client = chromadb.PersistentClient(path=active_db_full_path)
+                return client.get_collection(CHROMA_COLLECTION_NAME).count()
+            count_direct = await asyncio.to_thread(_direct_count)
+            report.append(f"📊 Кол-во записей (прямое): {count_direct}")
+        except Exception as e: report.append(f"❌ Ошибка прямого доступа: {e}")
+    
+    await message.answer("\n".join(report))
+
+# --- Message Handlers ---
+# Важно: хендлеры команд должны быть зарегистрированы в router ДО общих хендлеров сообщений,
+# чтобы они имели приоритет. Aiogram обычно это делает автоматически, если Command фильтры используются.
+
+@dp.business_message() 
+async def handle_business_message(message: aiogram_types.Message):
+    user_id = message.from_user.id 
+    chat_id = message.chat.id 
+    message_text = message.text or ""
+    business_connection_id = message.business_connection_id
+    log_prefix = f"handle_business_message(user:{user_id}, chat:{chat_id}, biz_conn:{business_connection_id}):"
+
+    # Предположение: если это dp.business_message, то пишет КЛИЕНТ БИЗНЕСУ.
+    # Ответы менеджера через Telegram Business API могут приходить как-то иначе
+    # или иметь другие признаки (например, message.outgoing == True).
+    # Текущая логика включения молчания по ответу менеджера здесь НЕ СРАБОТАЕТ,
+    # если только менеджер не пишет сам себе в бизнес-чат с ботом (что нетипично).
+    # Эта логика должна быть пересмотрена, когда будет ясна механика ответов менеджеров.
+
+    if await is_chat_silent(chat_id):
+        logger.info(f"{log_prefix} Бот в режиме молчания. Сообщение игнорируется.")
+        return
+    if not message_text.strip():
+        logger.info(f"{log_prefix} Пустое бизнес-сообщение. Игнорируем.")
+        return
+
+    pending_messages.setdefault(user_id, []).append(message_text)
+    logger.debug(f"{log_prefix} Бизнес-сообщение добавлено в буфер.")
+    if user_id in user_message_timers:
+        timer = user_message_timers.pop(user_id)
+        if not timer.done(): timer.cancel()
+    
+    new_timer = asyncio.create_task(schedule_buffered_processing(user_id, chat_id, business_connection_id))
+    user_message_timers[user_id] = new_timer
+
+@router.message(F.business_connection_id.is_(None)) 
+async def handle_regular_message(message: aiogram_types.Message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    message_text = message.text or ""
+    log_prefix = f"handle_regular_message(user:{user_id}, chat:{chat_id}):"
+
+    is_sender_admin = user_id == ADMIN_USER_ID
+    is_sender_manager = user_id in MANAGER_USER_IDS
+    
+    # Если менеджер (не админ) пишет боту напрямую (не команда)
+    if is_sender_manager and not is_sender_admin and not message_text.startswith('/'):
+        if not await is_chat_silent(chat_id):
+            logger.info(f"{log_prefix} Сообщение от менеджера {user_id}. Включаем пост. молчание для chat_id={chat_id}.")
+            await set_chat_silence_permanently(chat_id, True)
+        else:
+            logger.info(f"{log_prefix} Сообщение от менеджера {user_id}, но бот уже молчит для chat_id={chat_id}.")
+        return 
+
+    if await is_chat_silent(chat_id):
+        logger.info(f"{log_prefix} Бот в режиме молчания. Сообщение игнорируется.")
+        return
+    if not message_text.strip():
+        logger.info(f"{log_prefix} Пустое обычное сообщение. Игнорируем.")
+        return
+
+    pending_messages.setdefault(user_id, []).append(message_text)
+    logger.debug(f"{log_prefix} Обычное сообщение добавлено в буфер.")
+    if user_id in user_message_timers:
+        timer = user_message_timers.pop(user_id)
+        if not timer.done(): timer.cancel()
+    
+    new_timer = asyncio.create_task(schedule_buffered_processing(user_id, chat_id, None))
+    user_message_timers[user_id] = new_timer
+
+# --- Background Tasks & Utility ---
+async def log_context_telegram(user_id: int, query: str, context: str, response_text: Optional[str] = None):
     try:
-        with open(pid_file, 'w') as f:
-            f.write(str(pid))
-        logging.info(f"Создан PID файл: {pid_file} (PID: {pid})")
-    except OSError as e:
-         logging.error(f"Не удалось создать PID файл {pid_file}: {e}")
+        ts = datetime.datetime.now()
+        log_filename = os.path.join(LOGS_DIR, f"context_tg_{user_id}_{ts.strftime('%Y%m%d_%H%M%S_%f')}.log")
+        async def _write():
+            with open(log_filename, "w", encoding="utf-8") as f:
+                f.write(f"Timestamp: {ts.isoformat()}\nUser ID: {user_id}\n"
+                        f"--- User Query ---\n{query}\n"
+                        f"--- Retrieved Context ---\n{context or 'Контекст не найден.'}\n")
+                if response_text: f.write(f"--- Assistant Response ---\n{response_text}\n")
+        await asyncio.to_thread(_write)
+        logger.debug(f"Контекст (TG) для user_id {user_id} сохранен в {log_filename}")
+    except Exception as e: logger.error(f"Ошибка логирования контекста (TG) для user_id={user_id}: {e}", exc_info=True)
 
-def remove_pid_files():
-    """Удаляет все PID файлы, соответствующие шаблону bot*.pid"""
-    pid_files = glob.glob('bot*.pid')
-    if not pid_files:
-         logging.debug("PID файлы не найдены для удаления.")
-         return
-    logging.info(f"Удаление PID файлов: {pid_files}...")
-    for pid_file in pid_files:
-        try:
-            os.remove(pid_file)
-            logging.info(f"Удален файл {pid_file}")
-        except OSError as e:
-            logging.error(f"Ошибка при удалении {pid_file}: {str(e)}")
-
-def signal_handler(sig, frame):
-    """Обработчик сигналов для корректного завершения работы."""
-    signame = signal.Signals(sig).name
-    logging.warning(f"Получен сигнал {signame}. Начинаем остановку...")
-    remove_pid_files()
+async def cleanup_old_context_logs_telegram():
+    logger.info("Очистка старых логов контекста (TG)...")
+    count = 0
     try:
-        loop = asyncio.get_running_loop()
-        logging.info("Отменяем все активные задачи asyncio...")
-        for task in asyncio.all_tasks(loop):
-            if task is not asyncio.current_task(): # Не отменяем саму себя
-                 task.cancel()
-        # Даем время задачам на отмену
-        # loop.create_task(asyncio.sleep(1)) # Не лучший способ
-    except RuntimeError: # Если loop не запущен
-         logging.info("Event loop не запущен, остановка без отмены задач.")
-    # Остановка должна произойти в finally блока main
-    logging.info(f"Сигнал {signame} обработан. Завершение...")
-    # Не вызываем sys.exit(), чтобы finally в main мог выполниться
+        cutoff = time.time() - LOG_RETENTION_SECONDS
+        log_files = await asyncio.to_thread(glob.glob, os.path.join(LOGS_DIR, "context_tg_*.log"))
+        for filename in log_files:
+            try:
+                if await asyncio.to_thread(os.path.getmtime, filename) < cutoff:
+                    await asyncio.to_thread(os.remove, filename)
+                    count += 1
+            except FileNotFoundError: continue
+            except Exception as e: logger.error(f"Ошибка удаления лога {filename} (TG): {e}")
+        logger.info(f"Очистка логов (TG): удалено {count} файлов." if count > 0 else "Устаревшие логи (TG) не найдены.")
+    except Exception as e: logger.error(f"Критическая ошибка очистки логов (TG): {e}", exc_info=True)
 
-# --- НОВАЯ ФУНКЦИЯ ДЛЯ ЕЖЕДНЕВНОГО ОБНОВЛЕНИЯ --- 
-async def daily_database_update():
-    """Запускает обновление базы данных ежедневно в 3:00 ночи.
-       Отправляет отчет администратору.
-    """
-    logging.info("daily_database_update: Задача запущена.")
+async def daily_database_update_telegram():
+    logger.info("Задача ежедневного обновления БД (TG) запущена.")
     while True:
         try:
-            now = datetime.now()
-            # Определяем время следующего запуска (3:00)
-            target_time_today = now.replace(hour=3, minute=0, second=0, microsecond=0)
-            if now >= target_time_today:
-                # Если 3 часа сегодня уже прошло, планируем на завтра
-                target_time = target_time_today + timedelta(days=1)
-            else:
-                # Иначе планируем на сегодня
-                target_time = target_time_today
-            
-            sleep_duration = (target_time - now).total_seconds()
-            logging.info(f"daily_database_update: Следующее обновление запланировано на {target_time.strftime('%Y-%m-%d %H:%M:%S')}. Ожидание {sleep_duration:.0f} секунд...")
-            
+            now = datetime.datetime.now()
+            target = now.replace(hour=3, minute=0, second=0, microsecond=0)
+            if now >= target: target += datetime.timedelta(days=1)
+            sleep_duration = (target - now).total_seconds()
+            logger.info(f"Ежедневное обновление БД (TG) в {target:%Y-%m-%d %H:%M:%S}. Ожидание {sleep_duration:.0f}с...")
             await asyncio.sleep(sleep_duration)
             
-            # ---- Время обновления ----
-            logging.info("daily_database_update: Время обновления! Запуск update_vector_store()...")
-            update_result = await update_vector_store() # Вызываем без chat_id
-            logging.info("daily_database_update: update_vector_store() завершено. Отправка отчета...")
-            await notify_admin_of_update_result(update_result)
-            # ---- Обновление и отчет завершены ----
+            logger.info("Ежедневное обновление БД (TG): Запуск...")
+            update_result = await update_vector_store_telegram()
+            logger.info("Ежедневное обновление БД (TG): Завершено.")
             
-            # Небольшая пауза, чтобы гарантированно перейти к следующему дню
-            await asyncio.sleep(60) 
-            
+            if ADMIN_USER_ID:
+                msg = f"🔔 Ежедневное авто-обновление БЗ (TG):\n"
+                if update_result.get("success"):
+                    msg += (f"✅ Успешно!\n➕ Добавлено: {update_result.get('added_chunks', 'N/A')}\n"
+                            f"📊 Всего: {update_result.get('total_chunks', 'N/A')}\n")
+                    if update_result.get("new_active_path"): msg += f"📁 Путь: {os.path.basename(update_result['new_active_path'])}"
+                else: msg += f"❌ Ошибка: {update_result.get('error', 'N/A')}"
+                try: await bot.send_message(ADMIN_USER_ID, msg)
+                except Exception as e: logger.error(f"Ошибка отправки отчета админу (TG): {e}")
+            await asyncio.sleep(60)
         except asyncio.CancelledError:
-             logging.info("daily_database_update: Задача ежедневного обновления отменена.")
-             break # Выходим из цикла while
+             logger.info("Задача ежедневного обновления БД (TG) отменена.")
+             break
         except Exception as e:
-            logging.error(f"daily_database_update: Ошибка в цикле ежедневного обновления: {str(e)}", exc_info=True)
-            # В случае ошибки ждем час перед следующей попыткой
-            logging.info("daily_database_update: Ожидание 1 час перед следующей попыткой...")
+            logger.error(f"Ошибка в цикле ежедневного обновления БД (TG): {e}", exc_info=True)
             await asyncio.sleep(3600)
 
+async def periodic_cleanup_telegram():
+    logger.info("Задача периодической очистки (TG) запущена.")
+    while True:
+        try:
+            await cleanup_old_context_logs_telegram()
+            await cleanup_old_messages_in_memory()
+            logger.info("Периодическая очистка (TG) выполнена.")
+            await asyncio.sleep(3600) 
+        except asyncio.CancelledError:
+             logger.info("Задача периодической очистки (TG) отменена.")
+             break
+        except Exception as e:
+            logger.error(f"Ошибка периодической очистки (TG): {e}", exc_info=True)
+            await asyncio.sleep(300)
+
+# --- PID File Management and Signal Handling ---
+PID_FILE_BASENAME = "telegram_bot"
+def create_pid_file():
+    pid = os.getpid()
+    pid_file = f'{PID_FILE_BASENAME}.pid'; i = 1
+    while os.path.exists(pid_file): i += 1; pid_file = f'{PID_FILE_BASENAME}_{i}.pid'
+    try:
+        with open(pid_file, 'w') as f: f.write(str(pid))
+        logger.info(f"Создан PID файл: {pid_file} (PID: {pid})")
+    except OSError as e: logger.error(f"Не удалось создать PID файл {pid_file}: {e}")
+
+def remove_pid_files():
+    pid_files = glob.glob(f'{PID_FILE_BASENAME}*.pid')
+    if not pid_files: return
+    logger.info(f"Удаление PID файлов (TG): {pid_files}...")
+    for pf in pid_files:
+        try: os.remove(pf); logger.info(f"Удален {pf} (TG)")
+        except OSError as e: logger.error(f"Ошибка удаления {pf} (TG): {e}")
+
+async def shutdown(signal_obj, loop):
+    logger.warning(f"Получен сигнал {signal_obj.name}, начинаю остановку...")
+    tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
+    if tasks:
+        logger.info(f"Отменяю {len(tasks)} активных задач...")
+        for task in tasks: task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("Все активные задачи отменены.")
+    
+    # Закрытие сессии бота перед остановкой цикла
+    if bot and bot.session and not bot.session.closed:
+        logger.info("Закрытие сессии бота...")
+        await bot.session.close()
+        logger.info("Сессия бота закрыта.")
+
+    if loop.is_running(): # Проверяем, что цикл все еще запущен
+        logger.info("Остановка event loop...")
+        loop.stop()
+
+async def main():
+    logger.info("--- 🚀 Запуск Telegram бота ---")
+    create_pid_file()
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s, loop)))
+
+    get_drive_service_sync()
+    if not drive_service_instance:
+        logger.critical("КРИТИЧЕСКАЯ ОШИБКА: Google Drive не инициализирован. Остановка.")
+        remove_pid_files(); return
+
+    await load_silence_state_from_file()
+    await _initialize_active_vector_collection_telegram()
+    
+    if ADMIN_USER_ID: # Запускаем обновление только если есть админ для уведомления
+        logger.info("Запуск первоначального обновления БЗ (TG)...")
+        asyncio.create_task(run_update_and_notify_telegram(ADMIN_USER_ID))
+
+    dp.include_router(router) 
+    cleanup_task = asyncio.create_task(periodic_cleanup_telegram())
+    daily_update_db_task = asyncio.create_task(daily_database_update_telegram())
+    
+    logger.info("🤖 Telegram бот готов к работе.")
+    logger.info(f"🔇 Молчание для чатов: {list(chat_silence_state.keys())}")
+
+    try:
+        await dp.start_polling(bot)
+    except asyncio.CancelledError: logger.info("Основная задача dp.start_polling отменена.")
+    except Exception as e: logger.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА start_polling: {e}", exc_info=True)
+    finally:
+        logger.info("--- 🛑 Завершение работы Telegram бота (из finally main) ---")
+        # Отмена фоновых задач, если они еще не были отменены через shutdown
+        if cleanup_task and not cleanup_task.done(): cleanup_task.cancel()
+        if daily_update_db_task and not daily_update_db_task.done(): daily_update_db_task.cancel()
+        
+        # Дожидаемся завершения отмены
+        await asyncio.gather(cleanup_task, daily_update_db_task, return_exceptions=True)
+
+        # Закрытие сессии (на случай если shutdown не был вызван или не успел)
+        if bot and bot.session and not bot.session.closed:
+            logger.info("Закрытие сессии бота (из finally main)...")
+            await bot.session.close()
+            logger.info("Сессия бота закрыта (из finally main).")
+            
+        remove_pid_files()
+        logger.info("--- Telegram бот остановлен ---")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Бот остановлен вручную (KeyboardInterrupt).")
-    except asyncio.CancelledError:
-         logging.info("Основная задача выполнения отменена.")
-    except Exception as e:
-        logging.critical(f"КРИТИЧЕСКАЯ НЕПЕРЕХВАЧЕННАЯ ОШИБКА: {str(e)}", exc_info=True)
-        remove_pid_files()
+    except (KeyboardInterrupt, SystemExit): logger.info("Процесс прерван (KeyboardInterrupt/SystemExit).")
+    except Exception as e: logger.critical(f"КРИТИЧЕСКАЯ НЕПЕРЕХВАЧЕННАЯ ОШИБКА ЗАПУСКА: {e}", exc_info=True)
+    finally: logger.info("Процесс завершен.")
