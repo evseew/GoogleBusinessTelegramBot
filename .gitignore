@@ -4,29 +4,31 @@ venv/
 env/
 .env
 
-# Кэши и компилированные файлы
+# Кэши и компилированные файлы Python
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
 
 # Логи и временные файлы
-logs/*
-!logs/.gitkeep
-logs/context_logs/*
-!logs/context_logs/.gitkeep
+logs/context_logs_telegram/ # Игнорировать всю директорию логов контекста
+# Если вы хотите сохранять пустую директорию logs/ в Git:
+# logs/*
+# !logs/.gitkeep
 *.log
 *.pid
-.DS_Store
 
 # Локальная база данных векторов
-local_vector_db/*
-!local_vector_db/.gitkeep
+local_vector_db_telegram/ # Игнорировать всю директорию базы данных
+
+# Файл состояния режима молчания
+telegram_silence_state.json
 
 # Редакторы и IDE
 .vscode/
 .idea/
 .cursor/
+.history/ # Игнорировать историю файлов редактора
 
 # Системные файлы
 .DS_Store
@@ -36,4 +38,6 @@ Thumbs.db
 service-account-key.json
 *.pem
 *.key
-service-account-key.json
+
+# Другие файлы, которые могут генерироваться вашим проектом, но не нужны в Git
+# например, build/, dist/, *.egg-info/, и т.д. если применимо
