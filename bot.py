@@ -11,7 +11,7 @@ import json
 import re
 import signal # Для корректного завершения
 import shutil
-from asyncio import Lock, RLock # <--- ИЗМЕНЕНО: добавлен RLock
+from asyncio import Lock # <--- ИЗМЕНЕНО: Убран RLock, т.к. используем кастомный
 from collections import defaultdict # Для user_processing_locks
 from typing import Optional, List, Dict, Any
 
@@ -33,6 +33,57 @@ from aiogram.enums import ChatAction # Для статуса "печатает"
 from langchain_openai import OpenAIEmbeddings # Не используется напрямую, но может понадобиться если OpenAI API клиент не будет использоваться для эмбеддингов
 from langchain.text_splitter import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 from langchain_core.documents import Document # Langchain Document
+
+# --- Custom AsyncRLock Implementation (for Python < 3.9) ---
+class AsyncRLock:
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._owner = None
+        self._count = 0
+
+    async def acquire(self):
+        current_task = asyncio.current_task()
+        if self._owner == current_task:
+            self._count += 1
+            return True # Уже владеем, просто увеличиваем счетчик
+
+        # Если блокировка занята другой задачей или свободна, пытаемся захватить основной лок
+        await self._lock.acquire()
+        # После успешного захвата основного лока, мы - владелец
+        self._owner = current_task
+        self._count = 1
+        return True
+
+    def release(self):
+        current_task = asyncio.current_task()
+        if self._owner != current_task:
+            # Получаем имя текущей задачи для более информативного сообщения
+            current_task_name = current_task.get_name() if hasattr(current_task, 'get_name') else str(current_task)
+            owner_task_name = self._owner.get_name() if self._owner and hasattr(self._owner, 'get_name') else str(self._owner)
+            raise RuntimeError(f"Cannot release un-acquired lock or lock acquired by another task. Owner: {owner_task_name}, Current: {current_task_name}")
+        
+        self._count -= 1
+        if self._count == 0:
+            self._owner = None
+            self._lock.release() # Освобождаем основной лок только когда счетчик доходит до 0
+
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.release()
+
+    def locked(self):
+        return self._lock.locked()
+    
+    # Дополнительные методы для отладки, если понадобятся
+    def get_owner_task(self):
+        return self._owner
+
+    def get_recursion_count(self):
+        return self._count
+# --- End Custom AsyncRLock ---
 
 # --- Load Environment Variables ---
 # load_dotenv(override=True) # <--- Старый вызов load_dotenv закомментирован для новой логики
@@ -154,7 +205,7 @@ user_messages: Dict[int, List[Dict[str, Any]]] = {}
 
 pending_messages: Dict[int, List[str]] = {}  
 user_message_timers: Dict[int, asyncio.Task] = {}  
-user_processing_locks: defaultdict[int, asyncio.RLock] = defaultdict(RLock) # <--- ИЗМЕНЕНО: Lock на RLock
+user_processing_locks: defaultdict[int, AsyncRLock] = defaultdict(AsyncRLock) # <--- ИЗМЕНЕНО: Используем наш AsyncRLock
 
 chat_silence_state: Dict[int, bool] = {} 
 
