@@ -18,7 +18,7 @@ from typing import Optional, List, Dict, Any
 # --- Dependency Imports ---
 import openai
 import chromadb
-from dotenv import load_dotenv, find_dotenv
+from dotenv import load_dotenv, find_dotenv, dotenv_values
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -35,14 +35,38 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter, MarkdownHead
 from langchain_core.documents import Document # Langchain Document
 
 # --- Load Environment Variables ---
-load_dotenv(override=True)
-print(f"DEBUG: dotenv_path used: {find_dotenv()}")
-print(f"DEBUG: OPENAI_API_KEY из окружения до getenv: {os.environ.get('OPENAI_API_KEY')}")
+# load_dotenv(override=True) # <--- Старый вызов load_dotenv закомментирован для новой логики
+# print(f"DEBUG: dotenv_path used: {find_dotenv()}") # <--- Старый print закомментирован
+# print(f"DEBUG: OPENAI_API_KEY из окружения до getenv: {os.environ.get('OPENAI_API_KEY')}") # <--- Старый print закомментирован
+
+dotenv_path_found = find_dotenv()
+print(f"DEBUG: Полный путь к .env файлу, найденный find_dotenv(): {dotenv_path_found}")
+
+if dotenv_path_found and os.path.exists(dotenv_path_found):
+    print(f"DEBUG: Попытка загрузить переменные из файла: {dotenv_path_found}")
+    # Напрямую парсим значения из .env файла
+    parsed_values = dotenv_values(dotenv_path_found)
+    raw_key_from_file = parsed_values.get("OPENAI_API_KEY")
+    print(f"DEBUG: OPENAI_API_KEY напрямую из файла '{dotenv_path_found}' (через dotenv_values): {raw_key_from_file}")
+    
+    # Теперь загружаем в os.environ с override=True, используя найденный путь
+    load_dotenv(dotenv_path=dotenv_path_found, override=True)
+    print(f"DEBUG: load_dotenv(override=True) был вызван для файла: {dotenv_path_found}")
+else:
+    print(f"DEBUG: .env файл не найден по пути '{dotenv_path_found}' или путь не существует. load_dotenv не будет вызван с конкретным путем.")
+    # Пытаемся загрузить .env из стандартных мест (если find_dotenv не нашел, но вдруг)
+    load_dotenv(override=True)
+    print(f"DEBUG: load_dotenv(override=True) был вызван без указания конкретного пути (поиск по умолчанию).")
+
+print(f"DEBUG: OPENAI_API_KEY из os.environ.get ПОСЛЕ load_dotenv: {os.environ.get('OPENAI_API_KEY')}")
+print(f"DEBUG: OPENAI_API_KEY из os.getenv ПОСЛЕ load_dotenv: {os.getenv('OPENAI_API_KEY')}")
+
 
 # --- Configuration ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-print(f"DEBUG: OPENAI_API_KEY после getenv: {OPENAI_API_KEY}")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # <--- Это значение используется приложением
+# print(f"DEBUG: OPENAI_API_KEY после getenv: {OPENAI_API_KEY}") # <--- Заменено следующим print
+print(f"DEBUG: Итоговое значение OPENAI_API_KEY, присвоенное конфигурационной переменной: {OPENAI_API_KEY}")
 ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", 'service-account-key.json')
 FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
