@@ -35,7 +35,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter, MarkdownHead
 from langchain_core.documents import Document # Langchain Document
 
 # --- Load Environment Variables ---
-load_dotenv(override=True)
+load_dotenv()
 
 print(f"DEBUG: OPENAI_API_KEY из окружения до getenv: {os.environ.get('OPENAI_API_KEY')}")
 

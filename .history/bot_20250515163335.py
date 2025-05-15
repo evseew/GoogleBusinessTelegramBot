@@ -35,14 +35,11 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter, MarkdownHead
 from langchain_core.documents import Document # Langchain Document
 
 # --- Load Environment Variables ---
-load_dotenv(override=True)
-
-print(f"DEBUG: OPENAI_API_KEY из окружения до getenv: {os.environ.get('OPENAI_API_KEY')}")
+load_dotenv()
 
 # --- Configuration ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-print(f"DEBUG: OPENAI_API_KEY после getenv: {OPENAI_API_KEY}")
 ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", 'service-account-key.json')
 FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
