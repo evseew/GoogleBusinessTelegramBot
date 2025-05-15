@@ -18,7 +18,7 @@ from typing import Optional, List, Dict, Any
 # --- Dependency Imports ---
 import openai
 import chromadb
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -36,7 +36,7 @@ from langchain_core.documents import Document # Langchain Document
 
 # --- Load Environment Variables ---
 load_dotenv(override=True)
-
+print(f"DEBUG: dotenv_path used: {find_dotenv()}")
 print(f"DEBUG: OPENAI_API_KEY из окружения до getenv: {os.environ.get('OPENAI_API_KEY')}")
 
 # --- Configuration ---
