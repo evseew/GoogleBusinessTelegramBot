@@ -11,7 +11,7 @@ import json
 import re
 import signal # Для корректного завершения
 import shutil
-from asyncio import Lock
+from asyncio import Lock, RLock # <--- ИЗМЕНЕНО: добавлен RLock
 from collections import defaultdict # Для user_processing_locks
 from typing import Optional, List, Dict, Any
 
@@ -154,7 +154,7 @@ user_messages: Dict[int, List[Dict[str, Any]]] = {}
 
 pending_messages: Dict[int, List[str]] = {}  
 user_message_timers: Dict[int, asyncio.Task] = {}  
-user_processing_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+user_processing_locks: defaultdict[int, asyncio.RLock] = defaultdict(RLock) # <--- ИЗМЕНЕНО: Lock на RLock
 
 chat_silence_state: Dict[int, bool] = {} 
 
