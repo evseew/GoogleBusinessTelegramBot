@@ -593,88 +593,111 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
     else:
         logger.info(f"{log_prefix} Контекст не найден или база знаний отключена.")
 
+    # --- ДОБАВЛЯЕМ ДАТУ И ВРЕМЯ В НАЧАЛО PROMPT ---
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    full_prompt = f"Сегодня: {now_str}.\n" + full_prompt
+    # --- КОНЕЦ ДОБАВЛЕНИЯ ---
+
     logger.debug(f"{log_prefix} Вызов add_message_to_history для user_input...")
     await add_message_to_history(user_id, "user", user_input) 
     logger.debug(f"{log_prefix} add_message_to_history для user_input ВЫПОЛНЕН.")
 
-    try:
-        logger.debug(f"{log_prefix} Проверка активных runs для треда {thread_id} ПЕРЕД созданием нового сообщения...")
-        active_runs_response = await openai_client.beta.threads.runs.list(thread_id=thread_id)
-        active_runs_to_cancel = [run for run in active_runs_response.data if run.status in ['queued', 'in_progress', 'requires_action']]
-        if active_runs_to_cancel:
-            logger.warning(f"{log_prefix} Найдено {len(active_runs_to_cancel)} активных/ожидающих runs. Отменяем...")
-            for run_to_cancel in active_runs_to_cancel:
-                try:
-                    logger.debug(f"{log_prefix} Попытка отменить run {run_to_cancel.id}...")
-                    await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run_to_cancel.id)
-                    logger.info(f"{log_prefix} Отменен run {run_to_cancel.id}")
-                except Exception as cancel_error: logger.warning(f"{log_prefix} Не удалось отменить run {run_to_cancel.id}: {cancel_error}")
-        logger.debug(f"{log_prefix} Проверка активных runs ЗАВЕРШЕНА.")
-        
-        logger.debug(f"{log_prefix} Попытка создать сообщение в треде {thread_id}...")
-        await openai_client.beta.threads.messages.create(thread_id=thread_id, role="user", content=full_prompt)
-        logger.info(f"{log_prefix} Сообщение добавлено в тред {thread_id}. Попытка запустить run...")
+    MAX_RETRIES = 2  # всего 2 попытки (первая + одна повторная)
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.debug(f"{log_prefix} Попытка {attempt} отправки запроса в OpenAI...")
+            # --- основной блок отправки запроса (скопировано из текущей реализации) ---
+            logger.debug(f"{log_prefix} Проверка активных runs для треда {thread_id} ПЕРЕД созданием нового сообщения...")
+            active_runs_response = await openai_client.beta.threads.runs.list(thread_id=thread_id)
+            active_runs_to_cancel = [run for run in active_runs_response.data if run.status in ['queued', 'in_progress', 'requires_action']]
+            if active_runs_to_cancel:
+                logger.warning(f"{log_prefix} Найдено {len(active_runs_to_cancel)} активных/ожидающих runs. Отменяем...")
+                for run_to_cancel in active_runs_to_cancel:
+                    try:
+                        logger.debug(f"{log_prefix} Попытка отменить run {run_to_cancel.id}...")
+                        await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run_to_cancel.id)
+                        logger.info(f"{log_prefix} Отменен run {run_to_cancel.id}")
+                    except Exception as cancel_error: logger.warning(f"{log_prefix} Не удалось отменить run {run_to_cancel.id}: {cancel_error}")
+            logger.debug(f"{log_prefix} Проверка активных runs ЗАВЕРШЕНА.")
+            
+            logger.debug(f"{log_prefix} Попытка создать сообщение в треде {thread_id}...")
+            await openai_client.beta.threads.messages.create(thread_id=thread_id, role="user", content=full_prompt)
+            logger.info(f"{log_prefix} Сообщение добавлено в тред {thread_id}. Попытка запустить run...")
 
-        current_run = await openai_client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
-        logger.info(f"{log_prefix} Запущен новый run {current_run.id}. Начало опроса статуса...")
+            current_run = await openai_client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
+            logger.info(f"{log_prefix} Запущен новый run {current_run.id}. Начало опроса статуса...")
 
-        start_time = time.time()
-        run_completed_successfully = False
-        while time.time() - start_time < OPENAI_RUN_TIMEOUT_SECONDS:
-            await asyncio.sleep(1.5) 
-            run_status = await openai_client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=current_run.id)
-            logger.debug(f"{log_prefix} Статус run {current_run.id}: {run_status.status}")
-            if run_status.status == 'completed':
-                logger.info(f"{log_prefix} Run {current_run.id} успешно завершен.")
-                run_completed_successfully = True
-                break
-            elif run_status.status in ['failed', 'cancelled', 'expired']:
-                error_message_detail = f"Run {current_run.id} статус '{run_status.status}'."
-                last_error = getattr(run_status, 'last_error', None)
-                if last_error: error_message_detail += f" Ошибка: {last_error.message} (Код: {last_error.code})"
-                logger.error(f"{log_prefix} {error_message_detail}")
-                await log_context_telegram(user_id, user_input, context, f"ОШИБКА OPENAI: {error_message_detail}")
-                return "Произошла ошибка при обработке вашего запроса (статус OpenAI)."
-            elif run_status.status == 'requires_action':
-                 logger.warning(f"{log_prefix} Run {current_run.id} требует действия (Function Calling?).")
-                 await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=current_run.id)
-                 await log_context_telegram(user_id, user_input, context, "ОШИБКА OPENAI: requires_action")
-                 return "Внутренняя ошибка обработки (OpenAI requires_action)."
-        
-        if not run_completed_successfully: # Таймаут
-            logger.warning(f"{log_prefix} Таймаут ({OPENAI_RUN_TIMEOUT_SECONDS}s) для run {current_run.id}")
-            try:
-                await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=current_run.id)
-                logger.info(f"{log_prefix} Отменен run {current_run.id} из-за таймаута.")
-            except Exception as cancel_error: logger.warning(f"{log_prefix} Ошибка отмены run {current_run.id} после таймаута: {cancel_error}")
-            await log_context_telegram(user_id, user_input, context, "ОШИБКА OPENAI: Таймаут")
-            return "Внутренняя ошибка обработки (таймаут OpenAI)."
-
-        messages_response = await openai_client.beta.threads.messages.list(thread_id=thread_id, order="desc", limit=5)
-        assistant_response_content = None
-        for msg in messages_response.data:
-            if msg.role == "assistant" and msg.run_id == current_run.id:
-                if msg.content and msg.content[0].type == 'text': # Предполагаем один текстовый блок
-                    assistant_response_content = msg.content[0].text.value
-                    logger.info(f"{log_prefix} Получен релевантный ответ: {assistant_response_content[:100]}...")
+            start_time = time.time()
+            run_completed_successfully = False
+            while time.time() - start_time < OPENAI_RUN_TIMEOUT_SECONDS:
+                await asyncio.sleep(1.5) 
+                run_status = await openai_client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=current_run.id)
+                logger.debug(f"{log_prefix} Статус run {current_run.id}: {run_status.status}")
+                if run_status.status == 'completed':
+                    logger.info(f"{log_prefix} Run {current_run.id} успешно завершен.")
+                    run_completed_successfully = True
                     break
-        
-        if assistant_response_content:
-            await add_message_to_history(user_id, "assistant", assistant_response_content)
-            await log_context_telegram(user_id, user_input, context, assistant_response_content)
-            return assistant_response_content
-        else:
-            logger.warning(f"{log_prefix} Текстовый ответ от ассистента для run {current_run.id} не найден.")
-            await log_context_telegram(user_id, user_input, context, "ОТВЕТ АССИСТЕНТА НЕ НАЙДЕН ИЛИ ПУСТ")
-            return "Не удалось получить ответ от ассистента."
+                elif run_status.status in ['failed', 'cancelled', 'expired']:
+                    error_message_detail = f"Run {current_run.id} статус '{run_status.status}'."
+                    last_error = getattr(run_status, 'last_error', None)
+                    if last_error: error_message_detail += f" Ошибка: {last_error.message} (Код: {last_error.code})"
+                    logger.error(f"{log_prefix} {error_message_detail}")
+                    await log_context_telegram(user_id, user_input, context, f"ОШИБКА OPENAI: {error_message_detail}")
+                    break  # не retry, а сразу выход
+                elif run_status.status == 'requires_action':
+                     logger.warning(f"{log_prefix} Run {current_run.id} требует действия (Function Calling?).")
+                     await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=current_run.id)
+                     await log_context_telegram(user_id, user_input, context, "ОШИБКА OPENAI: requires_action")
+                     break  # не retry, а сразу выход
+            
+            if not run_completed_successfully:
+                logger.warning(f"{log_prefix} Таймаут ({OPENAI_RUN_TIMEOUT_SECONDS}s) для run {current_run.id}")
+                try:
+                    await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=current_run.id)
+                    logger.info(f"{log_prefix} Отменен run {current_run.id} из-за таймаута.")
+                except Exception as cancel_error: logger.warning(f"{log_prefix} Ошибка отмены run {current_run.id} после таймаута: {cancel_error}")
+                await log_context_telegram(user_id, user_input, context, "ОШИБКА OPENAI: Таймаут")
+                if attempt < MAX_RETRIES:
+                    logger.info(f"{log_prefix} Повторная попытка через 2 секунды...")
+                    await asyncio.sleep(2)
+                    continue
+                else:
+                    return "Ошибка доставки сообщения. Попробуйте позже."
 
-    except openai.APIError as e: # Более общая ошибка API OpenAI
-        logger.error(f"{log_prefix} Ошибка OpenAI API: {e}", exc_info=True)
-        return f"Ошибка OpenAI: {str(e)}. Попробуйте позже."
-    except Exception as e:
-        logger.error(f"{log_prefix} Непредвиденная ошибка: {e}", exc_info=True)
-        await log_context_telegram(user_id, user_input, context, f"НЕПРЕДВИДЕННАЯ ОШИБКА: {e}")
-        return "Произошла внутренняя ошибка."
+            messages_response = await openai_client.beta.threads.messages.list(thread_id=thread_id, order="desc", limit=5)
+            assistant_response_content = None
+            for msg in messages_response.data:
+                if msg.role == "assistant" and msg.run_id == current_run.id:
+                    if msg.content and msg.content[0].type == 'text': # Предполагаем один текстовый блок
+                        assistant_response_content = msg.content[0].text.value
+                        logger.info(f"{log_prefix} Получен релевантный ответ: {assistant_response_content[:100]}...")
+                        break
+            
+            if assistant_response_content:
+                await add_message_to_history(user_id, "assistant", assistant_response_content)
+                await log_context_telegram(user_id, user_input, context, assistant_response_content)
+                return assistant_response_content
+            else:
+                logger.warning(f"{log_prefix} Текстовый ответ от ассистента для run {current_run.id} не найден.")
+                await log_context_telegram(user_id, user_input, context, "ОТВЕТ АССИСТЕНТА НЕ НАЙДЕН ИЛИ ПУСТ")
+                return "Ошибка доставки сообщения. Попробуйте позже."
+        except openai.APIError as e: # Более общая ошибка API OpenAI
+            logger.error(f"{log_prefix} Ошибка OpenAI API: {e}", exc_info=True)
+            if attempt < MAX_RETRIES:
+                logger.info(f"{log_prefix} Повторная попытка через 2 секунды после ошибки OpenAI API...")
+                await asyncio.sleep(2)
+                continue
+            else:
+                return f"Ошибка OpenAI: {str(e)}. Попробуйте позже."
+        except Exception as e:
+            logger.error(f"{log_prefix} Непредвиденная ошибка: {e}", exc_info=True)
+            await log_context_telegram(user_id, user_input, context, f"НЕПРЕДВИДЕННАЯ ОШИБКА: {e}")
+            if attempt < MAX_RETRIES:
+                logger.info(f"{log_prefix} Повторная попытка через 2 секунды после непредвиденной ошибки...")
+                await asyncio.sleep(2)
+                continue
+            else:
+                return "Ошибка доставки сообщения. Попробуйте позже."
 
 # --- Vector Store Management (ChromaDB) ---
 async def get_relevant_context_telegram(query: str, k: int) -> str:
