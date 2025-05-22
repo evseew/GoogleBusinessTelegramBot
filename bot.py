@@ -1229,6 +1229,8 @@ async def shutdown(signal_obj, loop):
 HISTORY_DIR = "history"
 os.makedirs(HISTORY_DIR, exist_ok=True)
 
+USER_THREADS_FILE = "user_threads.json"
+
 # Сохраняет сообщение в историю пользователя
 def add_message_to_file_history(user_id: int, role: str, content: str):
     filename = os.path.join(HISTORY_DIR, f"history_{user_id}.jsonl")
