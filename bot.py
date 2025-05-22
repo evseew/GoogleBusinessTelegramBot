@@ -388,17 +388,21 @@ async def get_or_create_thread(user_id: int) -> Optional[str]:
         except openai.NotFoundError:
             logger.warning(f"Тред {thread_id} не найден в OpenAI для user_id={user_id} (TG). Создаем новый.")
             if user_id in user_threads: del user_threads[user_id]
+            save_user_threads_to_file()
         except Exception as e:
             logger.error(f"Ошибка доступа к треду {thread_id} для user_id={user_id} (TG): {e}. Создаем новый.")
             if user_id in user_threads: del user_threads[user_id]
-
+            save_user_threads_to_file()
     try:
         logger.info(f"Создаем новый тред для user_id={user_id} (TG)...")
         thread = await openai_client.beta.threads.create()
         thread_id = thread.id
         user_threads[user_id] = thread_id
+        save_user_threads_to_file()
         user_messages[user_id] = [] 
         logger.info(f"Создан новый тред {thread_id} для user_id={user_id} (TG)")
+        # --- Досылаем историю в новый тред ---
+        await replay_history_to_thread(user_id, thread_id, max_messages=30)
         return thread_id
     except Exception as e:
         logger.error(f"Критическая ошибка при создании нового треда для user_id={user_id} (TG): {e}", exc_info=True)
@@ -923,11 +927,19 @@ async def reset_conversation_command(message: aiogram_types.Message):
         if user_id in user_message_timers:
             timer = user_message_timers.pop(user_id)
             if not timer.done(): timer.cancel()
-        
         thread_id = user_threads.pop(user_id, None)
         if thread_id: logger.info(f"Тред {thread_id} для user_id={user_id} удален из памяти (TG).")
         if user_id in user_messages: del user_messages[user_id]
-        
+    # --- Удаляем файл истории пользователя ---
+    history_file = os.path.join(HISTORY_DIR, f"history_{user_id}.jsonl")
+    if os.path.exists(history_file):
+        try:
+            os.remove(history_file)
+            logger.info(f"Файл истории {history_file} удалён по /reset.")
+        except Exception as e:
+            logger.error(f"Ошибка удаления файла истории {history_file}: {e}")
+    # --- Сохраняем user_threads после удаления ---
+    save_user_threads_to_file()
     await message.answer("🔄 Диалог сброшен!")
 
 @router.message(Command("reset_all"))
@@ -936,9 +948,8 @@ async def reset_all_command(message: aiogram_types.Message):
         await message.answer("❌ Нет прав!")
         return
     logger.warning(f"Админ {ADMIN_USER_ID} инициировал ПОЛНЫЙ СБРОС (TG)!")
-    # ... (логика отмены таймеров, очистки словарей user_threads, user_messages, pending_messages) ...
     timers_cancelled = 0
-    for timer_task in list(user_message_timers.values()): # Iterate over a copy
+    for timer_task in list(user_message_timers.values()):
         if not timer_task.done():
             timer_task.cancel()
             timers_cancelled +=1
@@ -949,12 +960,29 @@ async def reset_all_command(message: aiogram_types.Message):
     user_threads.clear()
     user_messages_cleared = len(user_messages)
     user_messages.clear()
-
+    # --- Удаляем все файлы истории ---
+    for fname in glob.glob(os.path.join(HISTORY_DIR, "history_*.jsonl")):
+        try:
+            os.remove(fname)
+            logger.info(f"Файл истории {fname} удалён по /reset_all.")
+        except Exception as e:
+            logger.error(f"Ошибка удаления файла истории {fname}: {e}")
+    # --- Сохраняем user_threads после очистки ---
+    save_user_threads_to_file()
+    # --- Удаляем файл user_threads.json ---
+    if os.path.exists(USER_THREADS_FILE):
+        try:
+            os.remove(USER_THREADS_FILE)
+            logger.info(f"Файл {USER_THREADS_FILE} удалён по /reset_all.")
+        except Exception as e:
+            logger.error(f"Ошибка удаления {USER_THREADS_FILE}: {e}")
     await message.answer(f"🔄 ВСЕ ДИАЛОГИ СБРОШЕНЫ (TG).\n"
                          f"- Таймеров отменено: {timers_cancelled}\n"
                          f"- Буферов очищено: {pending_messages_cleared}\n"
                          f"- Тредов (память): {threads_cleared}\n"
-                         f"- Историй (память): {user_messages_cleared}")
+                         f"- Историй (память): {user_messages_cleared}\n"
+                         f"- Файлы истории удалены: да\n"
+                         f"- user_threads.json удалён: да")
 
 @router.message(Command("speak"))
 async def speak_command(message: aiogram_types.Message):
@@ -968,6 +996,8 @@ async def speak_command(message: aiogram_types.Message):
 
     if await is_chat_silent(chat_id):
         await set_chat_silence_permanently(chat_id, False)
+        # --- Подгружаем историю при снятии молчания ---
+        load_user_history_from_file(user_id)
         await message.answer("🤖 Режим молчания снят. Бот снова активен.")
         logger.info(f"Менеджер/админ {user_id} снял молчание для чата {chat_id} (TG).")
     else:
@@ -1017,6 +1047,10 @@ async def handle_business_message(message: aiogram_types.Message):
     business_connection_id = message.business_connection_id
     log_prefix = f"handle_business_message(user:{user_id}, chat:{chat_id}, biz_conn:{business_connection_id}):"
 
+    # --- Подгружаем историю, если её нет в памяти ---
+    if user_id not in user_messages:
+        load_user_history_from_file(user_id)
+
     # --- НОВАЯ ЛОГИКА: Автоматическое молчание для менеджеров ---
     # Эта проверка должна быть до общей проверки is_chat_silent,
     # чтобы менеджер мог активировать молчание, даже если оно еще не было включено.
@@ -1059,6 +1093,10 @@ async def handle_regular_message(message: aiogram_types.Message):
     chat_id = message.chat.id
     message_text = message.text or ""
     log_prefix = f"handle_regular_message(user:{user_id}, chat:{chat_id}):"
+
+    # --- Подгружаем историю, если её нет в памяти ---
+    if user_id not in user_messages:
+        load_user_history_from_file(user_id)
 
     is_sender_admin = user_id == ADMIN_USER_ID
     is_sender_manager = user_id in MANAGER_USER_IDS
@@ -1103,22 +1141,6 @@ async def log_context_telegram(user_id: int, query: str, context: str, response_
         logger.debug(f"Контекст (TG) для user_id {user_id} сохранен в {log_filename}")
     except Exception as e: logger.error(f"Ошибка логирования контекста (TG) для user_id={user_id}: {e}", exc_info=True)
 
-async def cleanup_old_context_logs_telegram():
-    logger.info("Очистка старых логов контекста (TG)...")
-    count = 0
-    try:
-        cutoff = time.time() - LOG_RETENTION_SECONDS
-        log_files = await asyncio.to_thread(glob.glob, os.path.join(LOGS_DIR, "context_tg_*.log"))
-        for filename in log_files:
-            try:
-                if await asyncio.to_thread(os.path.getmtime, filename) < cutoff:
-                    await asyncio.to_thread(os.remove, filename)
-                    count += 1
-            except FileNotFoundError: continue
-            except Exception as e: logger.error(f"Ошибка удаления лога {filename} (TG): {e}")
-        logger.info(f"Очистка логов (TG): удалено {count} файлов." if count > 0 else "Устаревшие логи (TG) не найдены.")
-    except Exception as e: logger.error(f"Критическая ошибка очистки логов (TG): {e}", exc_info=True)
-
 async def daily_database_update_telegram():
     logger.info("Задача ежедневного обновления БД (TG) запущена.")
     while True:
@@ -1155,7 +1177,6 @@ async def periodic_cleanup_telegram():
     logger.info("Задача периодической очистки (TG) запущена.")
     while True:
         try:
-            await cleanup_old_context_logs_telegram()
             await cleanup_old_messages_in_memory()
             logger.info("Периодическая очистка (TG) выполнена.")
             await asyncio.sleep(3600) 
@@ -1204,9 +1225,138 @@ async def shutdown(signal_obj, loop):
         logger.info("Остановка event loop...")
         loop.stop()
 
+# --- История сообщений ---
+HISTORY_DIR = "history"
+os.makedirs(HISTORY_DIR, exist_ok=True)
+
+# Сохраняет сообщение в историю пользователя
+def add_message_to_file_history(user_id: int, role: str, content: str):
+    filename = os.path.join(HISTORY_DIR, f"history_{user_id}.jsonl")
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "role": role,
+        "content": content
+    }
+    with open(filename, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+# Очищает историю старше N дней (по умолчанию 100)
+def cleanup_old_history(days: int = 100):
+    cutoff = datetime.now() - timedelta(days=days)
+    for fname in os.listdir(HISTORY_DIR):
+        if not fname.startswith("history_") or not fname.endswith(".jsonl"):
+            continue
+        full_path = os.path.join(HISTORY_DIR, fname)
+        new_lines = []
+        try:
+            with open(full_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                        ts = datetime.fromisoformat(entry["timestamp"])
+                        if ts >= cutoff:
+                            new_lines.append(line)
+                    except Exception:
+                        continue  # пропускаем битые строки
+            # Перезаписываем файл только если были удалены старые записи
+            if len(new_lines) < sum(1 for _ in open(full_path, "r", encoding="utf-8")):
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.writelines(new_lines)
+        except Exception:
+            continue
+
+# Периодическая асинхронная задача для автоочистки истории
+def start_periodic_history_cleanup():
+    async def periodic_history_cleanup():
+        while True:
+            cleanup_old_history(100)  # 100 дней
+            await asyncio.sleep(24 * 60 * 60)  # сутки
+    return asyncio.create_task(periodic_history_cleanup())
+
+# Встраиваем вызовы сохранения истории в нужные места:
+# 1. В add_message_to_history (чтобы всегда писать и в память, и в файл)
+_old_add_message_to_history = add_message_to_history
+async def add_message_to_history(user_id: int, role: str, content: str):
+    add_message_to_file_history(user_id, role, content)
+    await _old_add_message_to_history(user_id, role, content)
+
+# --- Функция загрузки истории пользователя из файла ---
+def load_user_history_from_file(user_id: int, days: int = 100):
+    filename = os.path.join(HISTORY_DIR, f"history_{user_id}.jsonl")
+    if not os.path.exists(filename):
+        return
+    cutoff = datetime.now() - timedelta(days=days)
+    history = []
+    with open(filename, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                ts = datetime.fromisoformat(entry["timestamp"])
+                if ts >= cutoff:
+                    history.append({
+                        'role': entry['role'],
+                        'content': entry['content'],
+                        'timestamp': ts
+                    })
+            except Exception:
+                continue
+    if history:
+        user_messages[user_id] = history
+
+# --- Загрузка соответствия user_id ↔ thread_id из файла ---
+def load_user_threads_from_file():
+    global user_threads
+    if os.path.exists(USER_THREADS_FILE):
+        try:
+            with open(USER_THREADS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                user_threads.clear()
+                for k, v in data.items():
+                    try:
+                        user_threads[int(k)] = v
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.error(f"Ошибка загрузки user_threads из файла: {e}")
+
+# --- Сохранение соответствия user_id ↔ thread_id в файл ---
+def save_user_threads_to_file():
+    try:
+        with open(USER_THREADS_FILE, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in user_threads.items()}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения user_threads в файл: {e}")
+
+# --- Досылка истории в новый тред OpenAI ---
+async def replay_history_to_thread(user_id: int, thread_id: str, max_messages: int = 20):
+    filename = os.path.join(HISTORY_DIR, f"history_{user_id}.jsonl")
+    if not os.path.exists(filename):
+        return
+    history = []
+    with open(filename, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                history.append(entry)
+            except Exception:
+                continue
+    # Берём только последние max_messages
+    history = history[-max_messages:]
+    for msg in history:
+        try:
+            await openai_client.beta.threads.messages.create(
+                thread_id=thread_id,
+                role=msg['role'],
+                content=msg['content']
+            )
+        except Exception as e:
+            logger.error(f"Ошибка досылки истории в тред {thread_id}: {e}")
+
 async def main():
     logger.info("--- 🚀 Запуск Telegram бота ---")
     create_pid_file()
+    # --- Загружаем user_threads из файла ---
+    load_user_threads_from_file()
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s, loop)))
@@ -1226,6 +1376,8 @@ async def main():
     dp.include_router(router) 
     cleanup_task = asyncio.create_task(periodic_cleanup_telegram())
     daily_update_db_task = asyncio.create_task(daily_database_update_telegram())
+    # --- Запуск автоочистки истории ---
+    start_periodic_history_cleanup()
     
     logger.info("🤖 Telegram бот готов к работе.")
     logger.info(f"🔇 Молчание для чатов: {list(chat_silence_state.keys())}")
