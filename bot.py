@@ -1235,7 +1235,7 @@ USER_THREADS_FILE = "user_threads.json"
 def add_message_to_file_history(user_id: int, role: str, content: str):
     filename = os.path.join(HISTORY_DIR, f"history_{user_id}.jsonl")
     entry = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.datetime.now().isoformat(),
         "role": role,
         "content": content
     }
@@ -1244,7 +1244,7 @@ def add_message_to_file_history(user_id: int, role: str, content: str):
 
 # Очищает историю старше N дней (по умолчанию 100)
 def cleanup_old_history(days: int = 100):
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
     for fname in os.listdir(HISTORY_DIR):
         if not fname.startswith("history_") or not fname.endswith(".jsonl"):
             continue
@@ -1287,7 +1287,7 @@ def load_user_history_from_file(user_id: int, days: int = 100):
     filename = os.path.join(HISTORY_DIR, f"history_{user_id}.jsonl")
     if not os.path.exists(filename):
         return
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
     history = []
     with open(filename, "r", encoding="utf-8") as f:
         for line in f:
