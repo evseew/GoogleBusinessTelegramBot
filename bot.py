@@ -1017,23 +1017,36 @@ async def handle_business_message(message: aiogram_types.Message):
     business_connection_id = message.business_connection_id
     log_prefix = f"handle_business_message(user:{user_id}, chat:{chat_id}, biz_conn:{business_connection_id}):"
 
-    # Предположение: если это dp.business_message, то пишет КЛИЕНТ БИЗНЕСУ.
-    # Ответы менеджера через Telegram Business API могут приходить как-то иначе
-    # или иметь другие признаки (например, message.outgoing == True).
-    # Текущая логика включения молчания по ответу менеджера здесь НЕ СРАБОТАЕТ,
-    # если только менеджер не пишет сам себе в бизнес-чат с ботом (что нетипично).
-    # Эта логика должна быть пересмотрена, когда будет ясна механика ответов менеджеров.
+    # --- НОВАЯ ЛОГИКА: Автоматическое молчание для менеджеров ---
+    # Эта проверка должна быть до общей проверки is_chat_silent,
+    # чтобы менеджер мог активировать молчание, даже если оно еще не было включено.
+    is_sender_admin = user_id == ADMIN_USER_ID
+    is_sender_manager = user_id in MANAGER_USER_IDS
+    
+    # Если менеджер (не админ) пишет боту через бизнес-соединение
+    if is_sender_manager and not is_sender_admin:
+        if not await is_chat_silent(chat_id):
+            logger.info(f"{log_prefix} Бизнес-сообщение от менеджера {user_id}. Включаем пост. молчание для chat_id={chat_id}.")
+            await set_chat_silence_permanently(chat_id, True) # Включает молчание и сохраняет состояние
+        else:
+            logger.info(f"{log_prefix} Бизнес-сообщение от менеджера {user_id}, но бот уже молчит для chat_id={chat_id}.")
+        return # Прекращаем обработку, если это менеджер (активировал молчание или оно уже было)
+    # --- КОНЕЦ НОВОЙ ЛОГИКИ ---
 
+    # Общая проверка: если чат УЖЕ в режиме молчания (например, включен командой /silence,
+    # или это сообщение от обычного пользователя, а чат замолчал из-за предыдущего сообщения менеджера)
     if await is_chat_silent(chat_id):
-        logger.info(f"{log_prefix} Бот в режиме молчания. Сообщение игнорируется.")
+        logger.info(f"{log_prefix} Бот в режиме молчания (общая проверка). Сообщение игнорируется.")
         return
-    if not message_text.strip():
+    
+    if not message_text.strip(): # Проверка на пустое сообщение
         logger.info(f"{log_prefix} Пустое бизнес-сообщение. Игнорируем.")
         return
 
     pending_messages.setdefault(user_id, []).append(message_text)
-    logger.debug(f"{log_prefix} Бизнес-сообщение добавлено в буфер.")
-    if user_id in user_message_timers:
+    logger.debug(f"{log_prefix} Бизнес-сообщение от обычного пользователя или админа добавлено в буфер.")
+    
+    if user_id in user_message_timers: # Отменяем предыдущий таймер, если есть
         timer = user_message_timers.pop(user_id)
         if not timer.done(): timer.cancel()
     
