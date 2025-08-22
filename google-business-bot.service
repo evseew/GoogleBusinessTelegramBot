@@ -7,17 +7,19 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/GoogleBusinessBot
-ExecStart=/bin/bash -c 'source /root/GoogleBusinessBot/new_venv/bin/activate && pip install -r /root/GoogleBusinessBot/requirements.txt && source /root/GoogleBusinessBot/.env && python /root/GoogleBusinessBot/bot.py'
+WorkingDirectory=/root/GoogleBusinessTelegramBot
+Environment="PATH=/root/GoogleBusinessTelegramBot/new_venv/bin"
+EnvironmentFile=/root/GoogleBusinessTelegramBot/.env
+ExecStart=/root/GoogleBusinessTelegramBot/new_venv/bin/python /root/GoogleBusinessTelegramBot/bot.py
 Restart=always
 RestartSec=30
 TimeoutStartSec=180
-StandardOutput=append:/root/GoogleBusinessBot/logs/bot.log
-StandardError=append:/root/GoogleBusinessBot/logs/bot_error.log
+StandardOutput=append:/root/GoogleBusinessTelegramBot/logs/bot.log
+StandardError=append:/root/GoogleBusinessTelegramBot/logs/bot_error.log
 
 # Создаем необходимые директории
-ExecStartPre=/bin/mkdir -p /root/GoogleBusinessBot/logs
-ExecStartPre=/bin/mkdir -p /root/GoogleBusinessBot/logs/context_logs
+ExecStartPre=/bin/mkdir -p /root/GoogleBusinessTelegramBot/logs
+ExecStartPre=/bin/mkdir -p /root/GoogleBusinessTelegramBot/logs/context_logs
 
 [Install]
 WantedBy=multi-user.target 

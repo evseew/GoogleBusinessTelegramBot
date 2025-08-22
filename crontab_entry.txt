@@ -1,0 +1,9 @@
+# Google Business Bot - автозапуск и обновления
+# Автозапуск бота после перезагрузки сервера
+@reboot cd /root/GoogleBusinessTelegramBot && sleep 30 && ./start_bot.sh
+
+# Ежедневное обновление базы знаний в 3:00 утра
+0 3 * * * cd /root/GoogleBusinessTelegramBot && ./update_db.sh >> logs/cron_update.log 2>&1
+
+# Еженедельная перезагрузка бота (по воскресеньям в 4:00) для очистки памяти
+0 4 * * 0 cd /root/GoogleBusinessTelegramBot && ./restart.sh >> logs/cron_restart.log 2>&1
