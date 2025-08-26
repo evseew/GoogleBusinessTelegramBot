@@ -540,6 +540,14 @@ async def process_buffered_messages(user_id: int, chat_id: int, business_connect
                 try: timer_to_cancel.cancel()
                 except Exception as e_inner_cancel: logger.debug(f"{log_prefix} Ошибка отмены таймера: {e_inner_cancel}")
 
+        # Повторная проверка режима молчания перед обработкой буфера
+        try:
+            if await is_chat_silent(chat_id):
+                logger.info(f"{log_prefix} Чат в режиме молчания при обработке буфера. Ответ не будет отправлен.")
+                return
+        except Exception as silence_check_error:
+            logger.error(f"{log_prefix} Ошибка повторной проверки молчания: {silence_check_error}")
+
         if not messages_to_process:
             logger.info(f"{log_prefix} Нет сообщений в буфере для user_id={user_id}.")
             return
