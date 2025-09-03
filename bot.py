@@ -1229,10 +1229,13 @@ async def shutdown(signal_obj, loop):
         logger.info("Все активные задачи отменены.")
     
     # Закрытие сессии бота перед остановкой цикла
-    if bot and bot.session and not bot.session.closed:
-        logger.info("Закрытие сессии бота...")
-        await bot.session.close()
-        logger.info("Сессия бота закрыта.")
+    try:
+        if bot and getattr(bot, 'session', None):
+            logger.info("Закрытие сессии бота...")
+            await bot.session.close()
+            logger.info("Сессия бота закрыта.")
+    except Exception as e:
+        logger.warning(f"Ошибка при закрытии сессии бота: {e}")
 
     if loop.is_running(): # Проверяем, что цикл все еще запущен
         logger.info("Остановка event loop...")
@@ -1420,10 +1423,13 @@ async def main():
         await asyncio.gather(*tasks_to_wait, return_exceptions=True)
 
         # Закрытие сессии (на случай если shutdown не был вызван или не успел)
-        if bot and bot.session and not bot.session.closed:
-            logger.info("Закрытие сессии бота (из finally main)...")
-            await bot.session.close()
-            logger.info("Сессия бота закрыта (из finally main).")
+        try:
+            if bot and getattr(bot, 'session', None):
+                logger.info("Закрытие сессии бота (из finally main)...")
+                await bot.session.close()
+                logger.info("Сессия бота закрыта (из finally main).")
+        except Exception as e:
+            logger.warning(f"Ошибка закрытия сессии бота (из finally): {e}")
             
         # PID-файлы теперь управляются внешним супервизором (start_bot.sh)
         logger.info("--- Telegram бот остановлен ---")

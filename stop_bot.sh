@@ -51,18 +51,19 @@ if [ -f bot.pid ]; then
     fi
 else
     echo "⚠️ Файл bot.pid не найден, ищем процесс бота..."
-    BOT_PID=$(ps aux | grep "python3\? bot.py" | grep -v grep | awk '{print $2}')
-    
-    if [ -n "$BOT_PID" ]; then
-        echo "🔍 Найден процесс бота с PID: $BOT_PID"
-        stop_bot $BOT_PID
+    PIDS=$(pgrep -f "python.*bot.py" || true)
+    if [ -n "$PIDS" ]; then
+        echo "🔍 Найдены процессы бота: $PIDS"
+        for PID in $PIDS; do
+            stop_bot $PID
+        done
     else
         echo "ℹ️ Процесс бота не найден. Возможно, бот не запущен."
     fi
 fi
 
 # Проверка запущенности после остановки
-if pgrep -f "python3\? bot.py" > /dev/null; then
+if pgrep -f "python.*bot.py" > /dev/null; then
     echo "❌ Внимание! Бот все еще запущен. Проверьте процессы вручную."
 else
     echo "✅ Бот не запущен."
