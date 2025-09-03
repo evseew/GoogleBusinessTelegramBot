@@ -159,6 +159,11 @@ LOG_RETENTION_SECONDS = int(os.getenv("LOG_RETENTION_SECONDS_TELEGRAM", "86400")
 USE_VECTOR_STORE_STR = os.getenv("USE_VECTOR_STORE_TELEGRAM", "True")
 USE_VECTOR_STORE = USE_VECTOR_STORE_STR.lower() == 'true'
 
+# Флаги для управления автообновлением базы знаний при управлении через скрипты
+# По умолчанию отключены, чтобы избежать дублей с cron/ручными скриптами
+ENABLE_STARTUP_KB_UPDATE = os.getenv("ENABLE_STARTUP_KB_UPDATE_TELEGRAM", "False").lower() == 'true'
+ENABLE_DAILY_KB_UPDATE = os.getenv("ENABLE_DAILY_KB_UPDATE_TELEGRAM", "False").lower() == 'true'
+
 MESSAGE_LIFETIME_DAYS = int(os.getenv("MESSAGE_LIFETIME_DAYS", "100")) 
 MESSAGE_LIFETIME = datetime.timedelta(days=MESSAGE_LIFETIME_DAYS)
 
@@ -1364,7 +1369,6 @@ async def replay_history_to_thread(user_id: int, thread_id: str, max_messages: i
 
 async def main():
     logger.info("--- 🚀 Запуск Telegram бота ---")
-    create_pid_file()
     # --- Загружаем user_threads из файла ---
     load_user_threads_from_file()
     loop = asyncio.get_event_loop()
@@ -1379,13 +1383,20 @@ async def main():
     await load_silence_state_from_file()
     await _initialize_active_vector_collection_telegram()
     
-    if ADMIN_USER_ID: # Запускаем обновление только если есть админ для уведомления
-        logger.info("Запуск первоначального обновления БЗ (TG)...")
+    if ENABLE_STARTUP_KB_UPDATE and ADMIN_USER_ID: # Запускаем обновление только если флаг включен
+        logger.info("Запуск первоначального обновления БЗ (TG) включен флагом окружения.")
         asyncio.create_task(run_update_and_notify_telegram(ADMIN_USER_ID))
+    else:
+        logger.info("Первоначальное обновление БЗ (TG) при старте отключено (ENABLE_STARTUP_KB_UPDATE_TELEGRAM=False).")
 
     dp.include_router(router) 
     cleanup_task = asyncio.create_task(periodic_cleanup_telegram())
-    daily_update_db_task = asyncio.create_task(daily_database_update_telegram())
+    daily_update_db_task = None
+    if ENABLE_DAILY_KB_UPDATE:
+        logger.info("Ежедневное авто-обновление БД (TG) включено флагом окружения.")
+        daily_update_db_task = asyncio.create_task(daily_database_update_telegram())
+    else:
+        logger.info("Ежедневное авто-обновление БД (TG) отключено (ENABLE_DAILY_KB_UPDATE_TELEGRAM=False).")
     # --- Запуск автоочистки истории ---
     start_periodic_history_cleanup()
     
@@ -1401,9 +1412,12 @@ async def main():
         # Отмена фоновых задач, если они еще не были отменены через shutdown
         if cleanup_task and not cleanup_task.done(): cleanup_task.cancel()
         if daily_update_db_task and not daily_update_db_task.done(): daily_update_db_task.cancel()
-        
-        # Дожидаемся завершения отмены
-        await asyncio.gather(cleanup_task, daily_update_db_task, return_exceptions=True)
+
+        # Дожидаемся завершения отмены (учитываем, что daily_update_db_task может быть None)
+        tasks_to_wait = [cleanup_task]
+        if daily_update_db_task:
+            tasks_to_wait.append(daily_update_db_task)
+        await asyncio.gather(*tasks_to_wait, return_exceptions=True)
 
         # Закрытие сессии (на случай если shutdown не был вызван или не успел)
         if bot and bot.session and not bot.session.closed:
@@ -1411,7 +1425,7 @@ async def main():
             await bot.session.close()
             logger.info("Сессия бота закрыта (из finally main).")
             
-        remove_pid_files()
+        # PID-файлы теперь управляются внешним супервизором (start_bot.sh)
         logger.info("--- Telegram бот остановлен ---")
 
 if __name__ == "__main__":
