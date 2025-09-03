@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Определяем директорию скрипта
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Создаем директорию для логов, если она не существует
 mkdir -p logs
 mkdir -p logs/context_logs
@@ -17,10 +20,10 @@ if [ -f bot.pid ]; then
     fi
 fi
 
-# Дополнительная проверка дублей по процессу (если процесс есть, но bot.pid нет)
-if pgrep -f "python.*bot.py" > /dev/null; then
-    EXIST_PID=$(pgrep -f "python.*bot.py" | head -n 1)
-    echo "⚠️ Найден уже запущенный процесс бота (по pgrep), PID: $EXIST_PID"
+# Дополнительная проверка дублей по процессу (если процесс есть, но bot.pid нет) — только в этой папке
+if pgrep -fa "$SCRIPT_DIR/bot.py" > /dev/null; then
+    EXIST_PID=$(pgrep -fa "$SCRIPT_DIR/bot.py" | awk '{print $1}' | head -n 1)
+    echo "⚠️ Найден уже запущенный процесс бота (в этой папке), PID: $EXIST_PID"
     echo "Для перезапуска используйте: ./restart.sh"
     exit 1
 fi
@@ -78,7 +81,7 @@ echo "✅ Супервизор запущен, PID: $$"
 RESTART_DELAY=5
 while true; do
   echo "▶️ Старт bot.py..."
-  nohup python3 bot.py >> logs/bot.log 2>&1 &
+  nohup python3 "$SCRIPT_DIR/bot.py" >> logs/bot.log 2>&1 &
   CHILD_PID=$!
   echo "👶 Дочерний PID: $CHILD_PID"
 

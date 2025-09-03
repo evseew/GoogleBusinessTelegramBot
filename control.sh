@@ -23,8 +23,8 @@ show_help() {
 
 # Функция для запуска бота
 start_bot() {
-    if pgrep -f "python.*bot.py" > /dev/null; then
-        echo "⚠️ Бот уже запущен!"
+    if pgrep -fa "$SCRIPT_DIR/bot.py" >  /dev/null; then
+        echo "⚠️ Бот уже запущен! (в этой папке)"
     else
         echo "🚀 Запускаем бота..."
         "${SCRIPT_DIR}/start_bot.sh"
@@ -33,7 +33,7 @@ start_bot() {
 
 # Функция для остановки бота
 stop_bot() {
-    if pgrep -f "python.*bot.py" > /dev/null; then
+    if pgrep -fa "$SCRIPT_DIR/bot.py" > /dev/null; then
         echo "🛑 Останавливаем бота..."
         "${SCRIPT_DIR}/stop_bot.sh"
     else
@@ -60,10 +60,16 @@ status_bot() {
             return 1
         fi
     else
-        BOT_PID=$(pgrep -f "python.*bot.py")
-        if [ -n "$BOT_PID" ]; then
-            UPTIME=$(ps -p $BOT_PID -o etime= | tr -d ' ')
-            echo "✅ Бот запущен (PID: $BOT_PID, активен: $UPTIME), но без PID файла"
+        BOT_PIDS=$(pgrep -fa "$SCRIPT_DIR/bot.py" | awk '{print $1}')
+        if [ -n "$BOT_PIDS" ]; then
+            FIRST_PID=$(echo "$BOT_PIDS" | head -n 1)
+            UPTIME=$(ps -p $FIRST_PID -o etime= | tr -d ' ')
+            COUNT=$(echo "$BOT_PIDS" | wc -l | tr -d ' ')
+            if [ "$COUNT" -gt 1 ]; then
+                echo "✅ Бот запущен (PID: $FIRST_PID, активен: $UPTIME), найдено процессов: $COUNT, но без PID файла"
+            else
+                echo "✅ Бот запущен (PID: $FIRST_PID, активен: $UPTIME), но без PID файла"
+            fi
             return 0
         else
             echo "❌ Бот не запущен!"
