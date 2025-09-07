@@ -1,0 +1,20 @@
+[Unit]
+Description=Google Business Bot KB Update (one-shot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/GoogleBusinessTelegramBot
+Environment="PATH=/root/GoogleBusinessTelegramBot/new_venv/bin"
+EnvironmentFile=/root/GoogleBusinessTelegramBot/.env
+ExecStart=/root/GoogleBusinessTelegramBot/new_venv/bin/python /root/GoogleBusinessTelegramBot/update_kb.py
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal
+OnFailure=google-business-bot-notify@%n.service
+
+[Install]
+WantedBy=multi-user.target
+
+
