@@ -1,19 +1,27 @@
 [Unit]
 Description=Google Business Bot
 After=network.target
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# Снимаем лимиты автоперезапуска, чтобы сервис самовосстанавливался без блокировок
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=root
+# УКАЖИТЕ РЕАЛЬНЫЙ ПУТЬ К ПРОЕКТУ НА СЕРВЕРЕ
 WorkingDirectory=/root/GoogleBusinessTelegramBot
+# Экспортируем PATH, чтобы использовать интерпретатор из venv
 Environment="PATH=/root/GoogleBusinessTelegramBot/new_venv/bin"
+# УКАЖИТЕ РЕАЛЬНЫЙ ПУТЬ К .env
 EnvironmentFile=/root/GoogleBusinessTelegramBot/.env
 ExecStart=/root/GoogleBusinessTelegramBot/new_venv/bin/python /root/GoogleBusinessTelegramBot/bot.py
+
+# Самовосстановление
 Restart=always
-RestartSec=30
+RestartSec=10
 TimeoutStartSec=180
+TimeoutStopSec=30
+
+# Логи в файлы (можно закомментировать и использовать journalctl)
 StandardOutput=append:/root/GoogleBusinessTelegramBot/logs/bot.log
 StandardError=append:/root/GoogleBusinessTelegramBot/logs/bot_error.log
 
@@ -21,5 +29,8 @@ StandardError=append:/root/GoogleBusinessTelegramBot/logs/bot_error.log
 ExecStartPre=/bin/mkdir -p /root/GoogleBusinessTelegramBot/logs
 ExecStartPre=/bin/mkdir -p /root/GoogleBusinessTelegramBot/logs/context_logs
 
+# Уведомление админу при падении, если systemd переведет сервис в failed
+OnFailure=google-business-bot-notify@%n.service
+
 [Install]
-WantedBy=multi-user.target 
+WantedBy=multi-user.target

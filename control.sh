@@ -21,61 +21,32 @@ show_help() {
     echo "  help    - Показать эту справку"
 }
 
-# Функция для запуска бота
+# Функция для запуска бота (через systemd)
 start_bot() {
-    if pgrep -fa "$SCRIPT_DIR/bot.py" >  /dev/null; then
-        echo "⚠️ Бот уже запущен! (в этой папке)"
-    else
-        echo "🚀 Запускаем бота..."
-        "${SCRIPT_DIR}/start_bot.sh"
-    fi
+    echo "🚀 Запускаем сервис google-business-bot..."
+    systemctl start google-business-bot
 }
 
-# Функция для остановки бота
+# Функция для остановки бота (через systemd)
 stop_bot() {
-    if pgrep -fa "$SCRIPT_DIR/bot.py" > /dev/null; then
-        echo "🛑 Останавливаем бота..."
-        "${SCRIPT_DIR}/stop_bot.sh"
-    else
-        echo "ℹ️ Бот не запущен!"
-    fi
+    echo "🛑 Останавливаем сервис google-business-bot..."
+    systemctl stop google-business-bot
 }
 
-# Функция для перезапуска бота
+# Функция для перезапуска бота (через systemd)
 restart_bot() {
-    echo "🔄 Перезапускаем бота..."
-    "${SCRIPT_DIR}/restart.sh"
+    echo "🔄 Перезапускаем сервис google-business-bot..."
+    systemctl restart google-business-bot
 }
 
-# Функция для проверки статуса бота
+# Функция для проверки статуса бота (через systemd)
 status_bot() {
-    if [ -f "$SCRIPT_DIR/bot.pid" ]; then
-        PID=$(cat "$SCRIPT_DIR/bot.pid")
-        if ps -p $PID > /dev/null; then
-            UPTIME=$(ps -p $PID -o etime= | tr -d ' ')
-            echo "✅ Бот запущен (PID: $PID, активен: $UPTIME)"
-            return 0
-        else
-            echo "⚠️ Найден недействительный PID файл. Бот, возможно, не запущен."
-            return 1
-        fi
+    if systemctl is-active --quiet google-business-bot; then
+        echo "✅ Сервис google-business-bot активен"
     else
-        BOT_PIDS=$(pgrep -fa "$SCRIPT_DIR/bot.py" | awk '{print $1}')
-        if [ -n "$BOT_PIDS" ]; then
-            FIRST_PID=$(echo "$BOT_PIDS" | head -n 1)
-            UPTIME=$(ps -p $FIRST_PID -o etime= | tr -d ' ')
-            COUNT=$(echo "$BOT_PIDS" | wc -l | tr -d ' ')
-            if [ "$COUNT" -gt 1 ]; then
-                echo "✅ Бот запущен (PID: $FIRST_PID, активен: $UPTIME), найдено процессов: $COUNT, но без PID файла"
-            else
-                echo "✅ Бот запущен (PID: $FIRST_PID, активен: $UPTIME), но без PID файла"
-            fi
-            return 0
-        else
-            echo "❌ Бот не запущен!"
-            return 1
-        fi
+        echo "❌ Сервис google-business-bot НЕ активен"
     fi
+    systemctl status google-business-bot | cat
 }
 
 # Функция для обновления базы знаний
@@ -84,15 +55,10 @@ update_db() {
     "${SCRIPT_DIR}/update_db.sh"
 }
 
-# Функция для просмотра логов
+# Функция для просмотра логов сервиса (journald)
 show_logs() {
-    LOG_FILE="$LOG_DIR/bot.log"
-    if [ -f "$LOG_FILE" ]; then
-        echo "📋 Последние 50 строк логов (используйте Ctrl+C для выхода):"
-        tail -n 50 -f "$LOG_FILE"
-    else
-        echo "❌ Файл логов не найден: $LOG_FILE"
-    fi
+    echo "📋 Логи сервиса (Ctrl+C для выхода):"
+    journalctl -u google-business-bot -n 50 -f
 }
 
 # Функция проверки настройки сервера
@@ -127,6 +93,11 @@ check_setup() {
     fi
     
     # Проверка службы systemd
+    if systemctl is-enabled --quiet google-business-bot; then
+        echo "✅ Служба systemd включена"
+    else
+        echo "⚠️ Служба systemd не включена в автозагрузку"
+    fi
     if systemctl is-active --quiet google-business-bot; then
         echo "✅ Служба systemd активна"
     else

@@ -1,0 +1,13 @@
+[Unit]
+Description=Notify admin when %I failed
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/GoogleBusinessTelegramBot
+EnvironmentFile=/root/GoogleBusinessTelegramBot/.env
+ExecStart=/bin/bash -lc '/root/GoogleBusinessTelegramBot/notify_admin.sh "%I" "$(systemctl show -p SubState --value %I)"'
+
+[Install]
+WantedBy=multi-user.target
+
+
