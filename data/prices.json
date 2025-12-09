@@ -1,0 +1,531 @@
+{
+  "meta": {
+    "version": "2025-2026",
+    "last_updated": "2025-01-01",
+    "currency": "RUB",
+    "notes": {
+      "academic_hour": "1 академический час = 40 минут",
+      "month_lessons": "Обычно 8 занятий в месяц (может варьироваться из-за праздников)",
+      "tax_deduction": "Налоговый вычет 13% доступен для всех курсов",
+      "family_discount": "Семейная скидка 20% на второго и последующих детей"
+    }
+  },
+
+  "price_tiers": {
+    "standard": {
+      "description": "Основные районы Челябинска",
+      "districts": ["Северо-Запад", "Центр", "Ленинский", "Парковый", "ЧТЗ"]
+    },
+    "reduced": {
+      "description": "Отдалённые районы (Копейск, Чурилово, ЧМЗ)",
+      "districts": ["ЧМЗ", "Чурилово", "Копейск"]
+    }
+  },
+
+  "courses": {
+    "pe_kids": {
+      "name": "PE Kids",
+      "display_name": "PE Kids — английский для дошкольников",
+      "description": "Английский для детей 3-6 лет (дошкольники)",
+      "age_range": {"min": 4, "max": 6},
+      "target_audience": "Дошкольники 3-6 лет",
+      "keywords": ["дошкольники", "малыши", "детский сад", "3-6 лет", "pe kids"],
+      "has_schedule_options": true,
+      "pricing": {
+        "unified": {
+          "weekdays": {
+            "note": "Единая цена для всех филиалов",
+            "format": "2 раза в неделю по 1.5 ак/часа (60 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 60,
+            "duration_academic_hours": 1.5,
+            "price_per_lesson": 630,
+            "price_per_academic_hour": 420,
+            "price_per_month": 5040,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_lesson"
+          },
+          "weekends": {
+            "note": "Единая цена для всех филиалов",
+            "format": "1 раз в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 1,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 900,
+            "price_per_academic_hour": 450,
+            "price_per_month": 3600,
+            "lessons_per_month": 4,
+            "recommended_price_unit": "per_lesson"
+          }
+        }
+      },
+      "benefits": ["tax_deduction", "family_discount"]
+    },
+
+    "pe_start": {
+      "name": "PE Start",
+      "display_name": "PE Start — основа английского",
+      "description": "Основа английского для детей 6-9 лет (подготовительная группа — 2 класс)",
+      "age_range": {"min": 6, "max": 9},
+      "grade_range": {"min": 0, "max": 2},
+      "target_audience": "Дети до 2 класса включительно",
+      "keywords": ["подготовка к школе", "основа английского", "1 класс", "2 класс", "pe start"],
+      "has_schedule_options": true,
+      "pricing": {
+        "standard": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 800,
+            "price_per_academic_hour": 400,
+            "price_per_month": 6400,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          },
+          "weekends": {
+            "format": "1 раз в неделю по 3 ак/часа (120 минут)",
+            "lessons_per_week": 1,
+            "duration_minutes": 120,
+            "duration_academic_hours": 3,
+            "price_per_lesson": 1230,
+            "price_per_academic_hour": 410,
+            "price_per_month": 4920,
+            "lessons_per_month": 4,
+            "recommended_price_unit": "per_lesson"
+          }
+        },
+        "reduced": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 740,
+            "price_per_academic_hour": 370,
+            "price_per_month": 5920,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          },
+          "weekends": {
+            "format": "1 раз в неделю по 3 ак/часа (120 минут)",
+            "lessons_per_week": 1,
+            "duration_minutes": 120,
+            "duration_academic_hours": 3,
+            "price_per_lesson": 1200,
+            "price_per_academic_hour": 400,
+            "price_per_month": 4800,
+            "lessons_per_month": 4,
+            "recommended_price_unit": "per_lesson"
+          }
+        }
+      },
+      "benefits": ["tax_deduction", "family_discount"]
+    },
+
+    "pe_five": {
+      "name": "PE Five",
+      "display_name": "PE Five — решение проблем в школе",
+      "description": "Курс для школьников 1-11 класса с трудностями по английскому",
+      "age_range": {"min": 7, "max": 17},
+      "grade_range": {"min": 1, "max": 11},
+      "target_audience": "Школьники с проблемами по английскому (плохие оценки, не понимает)",
+      "keywords": ["проблемы в школе", "плохие оценки", "двойки", "тройки", "помощь с английским", "pe five"],
+      "has_schedule_options": false,
+      "recommended_price_unit": "per_academic_hour",
+      "pricing": {
+        "standard": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 800,
+            "price_per_academic_hour": 400,
+            "price_per_month": 6400,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          }
+        },
+        "reduced": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 740,
+            "price_per_academic_hour": 370,
+            "price_per_month": 5920,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          }
+        }
+      },
+      "benefits": ["tax_deduction", "family_discount"]
+    },
+
+    "pe_future": {
+      "name": "PE Future",
+      "display_name": "PE Future — развитие свободного общения",
+      "description": "Курс для школьников 3-11 класса без проблем в школе, для развития",
+      "age_range": {"min": 9, "max": 17},
+      "grade_range": {"min": 3, "max": 11},
+      "target_audience": "Школьники без проблем, хотят развивать английский для будущего",
+      "keywords": ["свободное общение", "разговорный английский", "для будущего", "хорошие оценки", "pe future"],
+      "has_schedule_options": false,
+      "recommended_price_unit": "per_academic_hour",
+      "pricing": {
+        "standard": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 800,
+            "price_per_academic_hour": 400,
+            "price_per_month": 6400,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          }
+        },
+        "reduced": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 740,
+            "price_per_academic_hour": 370,
+            "price_per_month": 5920,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          }
+        }
+      },
+      "benefits": ["tax_deduction", "family_discount"]
+    },
+
+    "oge_ege": {
+      "name": "ОГЭ/ЕГЭ",
+      "display_name": "Подготовка к ОГЭ и ЕГЭ",
+      "description": "Подготовка к государственным экзаменам для 9-11 классов",
+      "age_range": {"min": 14, "max": 18},
+      "grade_range": {"min": 9, "max": 11},
+      "target_audience": "Школьники 9-11 классов, готовящиеся к экзаменам",
+      "keywords": ["огэ", "егэ", "подготовка к экзаменам", "экзамены английский", "9 класс", "11 класс"],
+      "has_schedule_options": false,
+      "recommended_price_unit": "per_academic_hour",
+      "pricing": {
+        "standard": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 840,
+            "price_per_academic_hour": 420,
+            "price_per_month": 6720,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          }
+        },
+        "reduced": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 780,
+            "price_per_academic_hour": 390,
+            "price_per_month": 6240,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          }
+        }
+      },
+      "benefits": ["tax_deduction", "family_discount"]
+    },
+
+    "pe_world": {
+      "name": "PE World",
+      "display_name": "PE World — английский для взрослых",
+      "description": "Английский для взрослых от 18 лет",
+      "age_range": {"min": 18, "max": null},
+      "target_audience": "Взрослые студенты",
+      "keywords": ["английский для взрослых", "взрослые курсы", "pe world"],
+      "has_schedule_options": false,
+      "recommended_price_unit": "per_academic_hour",
+      "pricing": {
+        "standard": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 840,
+            "price_per_academic_hour": 420,
+            "price_per_month": 6720,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          }
+        },
+        "reduced": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 780,
+            "price_per_academic_hour": 390,
+            "price_per_month": 6240,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          }
+        }
+      },
+      "benefits": ["tax_deduction"]
+    },
+
+    "pe_online": {
+      "name": "PE Online",
+      "display_name": "PE Online — онлайн-обучение",
+      "description": "Онлайн-формат для всех программ (от 9 лет)",
+      "age_range": {"min": 9, "max": null},
+      "target_audience": "Ученики от 9 лет (способность концентрироваться 60 минут)",
+      "keywords": ["онлайн", "дистанционное обучение", "удалённо", "pe online"],
+      "has_schedule_options": false,
+      "recommended_price_unit": "per_lesson",
+      "programs_available": ["PE Start (от 9 лет)", "PE Future", "PE Five", "ОГЭ/ЕГЭ", "PE World"],
+      "pricing": {
+        "unified": {
+          "note": "Единая цена для всех программ онлайн",
+          "format": "2 раза в неделю по 1.5 ак/часа (60 минут)",
+          "lessons_per_week": 2,
+          "duration_minutes": 60,
+          "duration_academic_hours": 1.5,
+          "price_per_lesson": 690,
+          "price_per_academic_hour": 460,
+          "price_per_month": 5520,
+          "lessons_per_month": 8,
+          "recommended_price_unit": "per_lesson"
+        }
+      },
+      "benefits": ["tax_deduction"],
+      "advantage": "Самый доступный формат обучения"
+    },
+
+    "chinese": {
+      "name": "Китайский язык",
+      "display_name": "Изучение китайского языка",
+      "description": "Курсы китайского языка для детей и взрослых",
+      "age_range": {"min": 7, "max": null},
+      "target_audience": "Дети и взрослые",
+      "keywords": ["китайский язык", "китайский", "изучение китайского"],
+      "has_schedule_options": true,
+      "pricing": {
+        "standard": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 840,
+            "price_per_academic_hour": 420,
+            "price_per_month": 6720,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          },
+          "weekends": {
+            "format": "1 раз в неделю по 3 ак/часа (120 минут)",
+            "lessons_per_week": 1,
+            "duration_minutes": 120,
+            "duration_academic_hours": 3,
+            "price_per_lesson": 1350,
+            "price_per_academic_hour": 450,
+            "price_per_month": 5400,
+            "lessons_per_month": 4,
+            "recommended_price_unit": "per_lesson"
+          }
+        },
+        "reduced": {
+          "weekdays": {
+            "format": "2 раза в неделю по 2 ак/часа (80 минут)",
+            "lessons_per_week": 2,
+            "duration_minutes": 80,
+            "duration_academic_hours": 2,
+            "price_per_lesson": 780,
+            "price_per_academic_hour": 390,
+            "price_per_month": 6240,
+            "lessons_per_month": 8,
+            "recommended_price_unit": "per_academic_hour"
+          },
+          "weekends": {
+            "format": "1 раз в неделю по 3 ак/часа (120 минут)",
+            "lessons_per_week": 1,
+            "duration_minutes": 120,
+            "duration_academic_hours": 3,
+            "price_per_lesson": 1260,
+            "price_per_academic_hour": 420,
+            "price_per_month": 5040,
+            "lessons_per_month": 4,
+            "recommended_price_unit": "per_lesson"
+          }
+        }
+      },
+      "benefits": ["tax_deduction", "family_discount", "pe_student_discount"],
+      "special_discount": {
+        "pe_student_discount": {
+          "value": 20,
+          "description": "Скидка 20% для студентов Planet English, которые уже изучают английский"
+        }
+      }
+    },
+
+    "individual": {
+      "name": "Индивидуальные занятия",
+      "display_name": "Индивидуальные занятия",
+      "description": "Персональные занятия с преподавателем один на один",
+      "offer_condition": "Предлагать ТОЛЬКО по запросу клиента! Не упоминать самостоятельно.",
+      "use_cases": [
+        "Быстрый догон группы при поступлении с пробелами в знаниях",
+        "Подготовка к выезду за границу или собеседованию",
+        "Комбинированный формат: группа + индивидуальные занятия",
+        "Не может посещать второе занятие из-за занятости"
+      ],
+      "recommended_response": "Рекомендую начать с групповых занятий — это эффективно и более доступно по цене. Если через месяц почувствуете, что нужен другой подход, всегда можем перейти на индивидуальные занятия или сформировать мини-группу с друзьями.",
+      "pricing": {
+        "standard": {
+          "russian_teacher": {
+            "external_student": {
+              "price_per_academic_hour": 2000,
+              "description": "Для новых студентов"
+            },
+            "with_advance_5000": {
+              "price_per_academic_hour": 1500,
+              "description": "При внесении аванса от 5000 ₽"
+            },
+            "group_student": {
+              "price_per_academic_hour": 1200,
+              "description": "Для студентов групповой формы"
+            }
+          },
+          "foreign_teacher": {
+            "external_student": {
+              "price_per_academic_hour": 2500,
+              "description": "Для новых студентов"
+            },
+            "with_advance_5000": {
+              "price_per_academic_hour": 2000,
+              "description": "При внесении аванса от 5000 ₽"
+            }
+          }
+        },
+        "reduced": {
+          "russian_teacher": {
+            "external_student": {
+              "price_per_academic_hour": 2000,
+              "description": "Для новых студентов"
+            },
+            "with_advance_5000": {
+              "price_per_academic_hour": 1500,
+              "description": "При внесении аванса от 5000 ₽"
+            },
+            "group_student": {
+              "price_per_academic_hour": 1000,
+              "description": "Для студентов групповой формы"
+            }
+          },
+          "foreign_teacher": {
+            "external_student": {
+              "price_per_academic_hour": 2500,
+              "description": "Для новых студентов"
+            },
+            "with_advance_5000": {
+              "price_per_academic_hour": 2000,
+              "description": "При внесении аванса от 5000 ₽"
+            }
+          }
+        }
+      },
+      "benefits": ["tax_deduction"]
+    },
+
+    "mini_groups": {
+      "name": "Мини-группы",
+      "display_name": "Мини-группы (2-4 человека)",
+      "description": "Занятия в мини-группе с индивидуальным расписанием",
+      "offer_condition": "Предлагать ТОЛЬКО по запросу клиента! Не упоминать самостоятельно.",
+      "features": [
+        "Расписание формируется под запрос конкретных клиентов",
+        "Обычно это семьи (братья/сестры), одноклассники, друзья",
+        "Участники должны быть примерно одного возраста и уровня",
+        "Более гибкое расписание, чем у обычных групп"
+      ],
+      "pricing": {
+        "standard": {
+          "russian_teacher": {
+            "2_people": {"price_per_academic_hour": 1200, "description": "2 человека"},
+            "3_people": {"price_per_academic_hour": 900, "description": "3 человека"},
+            "4_people": {"price_per_academic_hour": 700, "description": "4 человека"}
+          },
+          "foreign_teacher": {
+            "2_people": {"price_per_academic_hour": 1600, "description": "2 человека"},
+            "3_people": {"price_per_academic_hour": 1200, "description": "3 человека"},
+            "4_people": {"price_per_academic_hour": 1000, "description": "4 человека"}
+          }
+        },
+        "reduced": {
+          "russian_teacher": {
+            "2_people": {"price_per_academic_hour": 900, "description": "2 человека"},
+            "3_people": {"price_per_academic_hour": 700, "description": "3 человека"},
+            "4_people": {"price_per_academic_hour": 550, "description": "4 человека"}
+          },
+          "foreign_teacher": {
+            "2_people": {"price_per_academic_hour": 1100, "description": "2 человека"},
+            "3_people": {"price_per_academic_hour": 900, "description": "3 человека"},
+            "4_people": {"price_per_academic_hour": 750, "description": "4 человека"}
+          }
+        }
+      },
+      "benefits": ["tax_deduction", "family_discount"]
+    }
+  },
+
+  "benefits_info": {
+    "tax_deduction": {
+      "name": "Налоговый вычет",
+      "value": 13,
+      "description": "Возврат 13% от стоимости обучения через налоговый вычет"
+    },
+    "family_discount": {
+      "name": "Семейная скидка",
+      "value": 20,
+      "description": "Скидка 20% на второго и последующих детей из одной семьи"
+    },
+    "pe_student_discount": {
+      "name": "Скидка для студентов PE",
+      "value": 20,
+      "description": "Скидка 20% на китайский язык для тех, кто уже изучает английский в Planet English"
+    }
+  },
+
+  "price_ranges": {
+    "general": {
+      "min_per_academic_hour": 350,
+      "max_per_academic_hour": 400,
+      "description": "Академический час стоит от 350 до 400 рублей в зависимости от курса и филиала"
+    },
+    "per_lesson": {
+      "min": 630,
+      "max": 1350,
+      "description": "Стоимость занятия от 630 ₽ до 1350 ₽ в зависимости от программы и формата"
+    },
+    "per_month": {
+      "min": 4800,
+      "max": 6720,
+      "description": "Стоимость в месяц от 4800 ₽ до 6720 ₽"
+    }
+  }
+}
+

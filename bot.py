@@ -669,6 +669,9 @@ async def process_buffered_messages(user_id: int, chat_id: int, business_connect
 
             response_text = await chat_with_assistant(user_id, combined_input)
             
+            # Замена специальных пробелов на обычные (GPT-5 использует U+202F - узкий неразрывный пробел)
+            response_text = response_text.replace('\u202f', ' ').replace('\u00a0', ' ')
+            
             message_params = {"chat_id": chat_id, "text": response_text, "parse_mode": "Markdown"}
             if business_connection_id: message_params["business_connection_id"] = business_connection_id
             try:

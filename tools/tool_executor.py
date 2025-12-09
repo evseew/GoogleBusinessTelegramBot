@@ -13,6 +13,12 @@ from .branch_tools import (
     get_branches_tool_for_responses_api,
     BRANCHES_FUNCTION_NAME,
 )
+from .price_tools import (
+    get_prices,
+    PRICES_TOOL_DEFINITION,
+    get_prices_tool_for_responses_api,
+    PRICES_FUNCTION_NAME,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +27,13 @@ logger = logging.getLogger(__name__)
 # Для Chat Completions API
 AVAILABLE_TOOLS_CHAT: List[Dict[str, Any]] = [
     BRANCHES_TOOL_DEFINITION,
-    # Сюда будут добавляться другие tools (prices, schedules)
+    PRICES_TOOL_DEFINITION,
 ]
 
 # Маппинг имён функций на реальные функции
 TOOL_FUNCTIONS: Dict[str, Callable] = {
     "get_branches": get_branches,
-    # Сюда будут добавляться другие функции
+    "get_prices": get_prices,
 }
 
 
@@ -44,7 +50,7 @@ def get_tools_for_api(api_type: str = "responses") -> List[Dict[str, Any]]:
         # Responses API использует другой формат
         return [
             get_branches_tool_for_responses_api(),
-            # Сюда будут добавляться другие tools
+            get_prices_tool_for_responses_api(),
         ]
 
 
