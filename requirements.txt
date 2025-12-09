@@ -12,8 +12,8 @@ langchain-text-splitters>=0.3.0
 langchain-openai>=0.0.2
 chromadb>=0.4.18
 
-# OpenAI
-openai>=1.3.0
+# OpenAI (минимум 1.56.0 для Responses/Conversations API)
+openai>=1.56.0
 
 # Обработка документов
 PyPDF2>=3.0.1

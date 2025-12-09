@@ -31,8 +31,18 @@ from aiogram.enums import ChatAction # Для статуса "печатает"
 
 # LangChain components
 from langchain_openai import OpenAIEmbeddings # Не используется напрямую, но может понадобиться если OpenAI API клиент не будет использоваться для эмбеддингов
-from langchain.text_splitter import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 from langchain_core.documents import Document # Langchain Document
+
+# Function Calling Tools
+from tools import (
+    get_tools_for_api,
+    execute_tool_call,
+    parse_tool_calls_from_response,
+    format_tool_results_for_api,
+    has_tool_calls,
+    get_text_from_response,
+)
 
 # --- Custom AsyncRLock Implementation (for Python < 3.9) ---
 class AsyncRLock:
@@ -151,6 +161,85 @@ try:
 except ValueError:
     logging.warning(f"Некорректное значение OPENAI_EMBEDDING_DIMENSIONS ('{_dim_str}'), используется None.")
     OPENAI_EMBEDDING_DIMENSIONS = None
+USE_OPENAI_RESPONSES_STR = os.getenv("USE_OPENAI_RESPONSES", "False")
+USE_OPENAI_RESPONSES = USE_OPENAI_RESPONSES_STR.lower() == 'true'
+
+# --- Responses API Configuration ---
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+SYSTEM_INSTRUCTIONS_FILE = os.getenv("SYSTEM_INSTRUCTIONS_FILE", "instructions/system_prompt.md")
+
+# Параметры генерации
+def _parse_int(value: str, default: int = None):
+    """Парсит int из строки, возвращает default (или None) при ошибке."""
+    if not value or value.lower() == 'none':
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+# Параметры для GPT-5 и выше (Responses API)
+# reasoning.effort: "none", "low", "medium", "high"
+OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "medium")
+# text.verbosity: "low", "medium", "high" — детальность ответа
+OPENAI_TEXT_VERBOSITY = os.getenv("OPENAI_TEXT_VERBOSITY", "medium")
+OPENAI_MAX_OUTPUT_TOKENS = _parse_int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS"), None)
+OPENAI_HISTORY_LIMIT = _parse_int(os.getenv("OPENAI_HISTORY_LIMIT"), 20)  # Сколько сообщений истории передавать
+
+def _parse_float(value: str, default: float = None):
+    """Парсит float из строки, возвращает default (или None) при ошибке."""
+    if not value or value.lower() == 'none':
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+# temperature: 0-2, default 1. Ниже = детерминированнее, выше = креативнее
+OPENAI_TEMPERATURE = _parse_float(os.getenv("OPENAI_TEMPERATURE"), None)
+
+def is_reasoning_model(model_name: str) -> bool:
+    """Определяет, поддерживает ли модель параметры reasoning/text.
+    
+    Reasoning-модели: gpt-5, o1, o3 (без суффикса -chat-)
+    Chat-модели: gpt-5-chat-*, gpt-4o, gpt-4-turbo и т.д.
+    """
+    model_lower = model_name.lower()
+    # Chat-модели НЕ поддерживают reasoning
+    if "-chat-" in model_lower or "-chat" in model_lower:
+        return False
+    # GPT-4 серия — НЕ reasoning
+    if model_lower.startswith("gpt-4"):
+        return False
+    # o1, o3, gpt-5 (без -chat-) — reasoning модели
+    if model_lower.startswith(("o1", "o3", "gpt-5")):
+        return True
+    # По умолчанию считаем НЕ reasoning (безопаснее)
+    return False
+
+def load_system_instructions() -> str:
+    """Загружает системные инструкции из файла."""
+    default_instructions = "Ты полезный ассистент. Отвечай на русском языке."
+    
+    if not os.path.exists(SYSTEM_INSTRUCTIONS_FILE):
+        logging.warning(f"Файл инструкций '{SYSTEM_INSTRUCTIONS_FILE}' не найден. Используются инструкции по умолчанию.")
+        return default_instructions
+    
+    try:
+        with open(SYSTEM_INSTRUCTIONS_FILE, "r", encoding="utf-8") as f:
+            instructions = f.read().strip()
+        if instructions:
+            logging.info(f"Системные инструкции загружены из '{SYSTEM_INSTRUCTIONS_FILE}' ({len(instructions)} символов)")
+            return instructions
+        else:
+            logging.warning(f"Файл инструкций '{SYSTEM_INSTRUCTIONS_FILE}' пуст. Используются инструкции по умолчанию.")
+            return default_instructions
+    except Exception as e:
+        logging.error(f"Ошибка загрузки инструкций из '{SYSTEM_INSTRUCTIONS_FILE}': {e}")
+        return default_instructions
+
+# Загружаем инструкции при старте
+SYSTEM_INSTRUCTIONS = load_system_instructions()
 
 CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME_TELEGRAM", "documents_telegram")
 RELEVANT_CONTEXT_COUNT = int(os.getenv("RELEVANT_CONTEXT_COUNT", "3"))
@@ -196,6 +285,17 @@ logger = logging.getLogger(__name__)
 try:
     openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
     logger.info("Клиент OpenAI Async инициализирован.")
+    try:
+        logger.info(f"OpenAI SDK version: {getattr(openai, '__version__', 'unknown')}")
+    except Exception:
+        pass
+    logger.info(f"USE_OPENAI_RESPONSES={os.getenv('USE_OPENAI_RESPONSES')}")
+    try:
+        has_resp = hasattr(openai_client, "responses")
+        has_conv = hasattr(openai_client, "conversations")
+        logger.debug(f"Клиент атрибуты: responses={has_resp}, conversations={has_conv}")
+    except Exception:
+        logger.debug("Не удалось проверить атрибуты клиента OpenAI.")
 except Exception as e:
     logger.critical(f"Не удалось инициализировать клиент OpenAI: {e}", exc_info=True)
     sys.exit(1)
@@ -569,9 +669,15 @@ async def process_buffered_messages(user_id: int, chat_id: int, business_connect
 
             response_text = await chat_with_assistant(user_id, combined_input)
             
-            message_params = {"chat_id": chat_id, "text": response_text}
+            message_params = {"chat_id": chat_id, "text": response_text, "parse_mode": "Markdown"}
             if business_connection_id: message_params["business_connection_id"] = business_connection_id
-            await bot.send_message(**message_params)
+            try:
+                await bot.send_message(**message_params)
+            except Exception as parse_err:
+                # Если Markdown не распарсился, отправляем без форматирования
+                logger.warning(f"{log_prefix} Ошибка парсинга Markdown, отправляю без форматирования: {parse_err}")
+                message_params["parse_mode"] = None
+                await bot.send_message(**message_params)
             logger.info(f"{log_prefix} Успешно обработан и отправлен ответ для user_id={user_id}.")
         except Exception as e:
             logger.error(f"{log_prefix} Ошибка при обработке или отправке ответа для user_id={user_id}: {e}", exc_info=True)
@@ -587,10 +693,12 @@ async def process_buffered_messages(user_id: int, chat_id: int, business_connect
 async def chat_with_assistant(user_id: int, user_input: str) -> str:
     log_prefix = f"chat_with_assistant(user:{user_id}):"
     logger.info(f"{log_prefix} Запрос: {user_input[:100]}...")
-
-    thread_id = await get_or_create_thread(user_id)
-    if not thread_id:
-        return "Произошла внутренняя ошибка (не удалось создать или получить тред OpenAI)."
+    
+    # Проверяем доступность Responses API
+    use_responses = USE_OPENAI_RESPONSES and hasattr(openai_client, "responses")
+    logger.debug(f"{log_prefix} Путь: {'Responses API' if use_responses else 'Assistants Threads/Runs'}")
+    if USE_OPENAI_RESPONSES and not use_responses:
+        logger.warning(f"{log_prefix} USE_OPENAI_RESPONSES=True, но клиент не поддерживает Responses API. Фоллбек на Threads/Runs.")
 
     context = ""
     if USE_VECTOR_STORE and vector_collection:
@@ -618,6 +726,130 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
     logger.debug(f"{log_prefix} Вызов add_message_to_history для user_input...")
     await add_message_to_history(user_id, "user", user_input) 
     logger.debug(f"{log_prefix} add_message_to_history для user_input ВЫПОЛНЕН.")
+
+    if USE_OPENAI_RESPONSES:
+        # --- Responses API с поддержкой Function Calling ---
+        try:
+            logger.debug(f"{log_prefix} Старт запроса через Responses API...")
+            
+            # Собираем историю сообщений для контекста (последние N сообщений)
+            input_messages: List[Dict[str, Any]] = []
+            
+            if user_id in user_messages:
+                history_messages = user_messages[user_id][-OPENAI_HISTORY_LIMIT:]
+                for msg in history_messages:
+                    input_messages.append({
+                        "role": msg['role'],
+                        "content": msg['content']
+                    })
+                logger.debug(f"{log_prefix} Загружено {len(history_messages)} сообщений из истории")
+            
+            # Добавляем текущее сообщение пользователя
+            input_messages.append({
+                "role": "user",
+                "content": full_prompt
+            })
+            
+            logger.debug(f"{log_prefix} Отправляем {len(input_messages)} сообщений в Responses API")
+            
+            # Формируем параметры запроса
+            request_params = {
+                "model": OPENAI_MODEL,
+                "instructions": SYSTEM_INSTRUCTIONS,
+                "input": input_messages,
+                "tools": get_tools_for_api("responses"),  # Добавляем Function Calling tools
+            }
+            
+            # Параметры reasoning/text только для reasoning-моделей (gpt-5, o1, o3)
+            use_reasoning = is_reasoning_model(OPENAI_MODEL)
+            if use_reasoning:
+                request_params["reasoning"] = {"effort": OPENAI_REASONING_EFFORT}
+                request_params["text"] = {"verbosity": OPENAI_TEXT_VERBOSITY}
+            
+            # Добавляем опциональные параметры
+            if OPENAI_MAX_OUTPUT_TOKENS:
+                request_params["max_output_tokens"] = OPENAI_MAX_OUTPUT_TOKENS
+            if OPENAI_TEMPERATURE is not None:
+                request_params["temperature"] = OPENAI_TEMPERATURE
+            
+            tools_count = len(get_tools_for_api())
+            logger.debug(f"{log_prefix} Параметры: model={OPENAI_MODEL}, tools={tools_count}, reasoning={use_reasoning}, temperature={OPENAI_TEMPERATURE}")
+            
+            # --- Цикл обработки запросов с Function Calling ---
+            MAX_TOOL_ITERATIONS = 5  # Максимум итераций tool calls
+            iteration = 0
+            assistant_response_content = None
+            
+            while iteration < MAX_TOOL_ITERATIONS:
+                iteration += 1
+                logger.debug(f"{log_prefix} Итерация {iteration}/{MAX_TOOL_ITERATIONS}")
+                
+                try:
+                    resp = await openai_client.responses.create(**request_params)
+                except Exception as e_resp:
+                    logger.error(f"{log_prefix} Ошибка Responses API: {e_resp}", exc_info=True)
+                    await log_context_telegram(user_id, user_input, context, f"ОШИБКА RESPONSES API: {e_resp}")
+                    return "Ошибка доставки сообщения. Попробуйте позже."
+                
+                # Проверяем, есть ли tool calls в ответе
+                if has_tool_calls(resp):
+                    tool_calls = parse_tool_calls_from_response(resp)
+                    logger.info(f"{log_prefix} Получено {len(tool_calls)} tool calls")
+                    
+                    # Выполняем все tool calls
+                    tool_results = []
+                    for tc in tool_calls:
+                        result = execute_tool_call(tc["name"], tc["arguments"])
+                        tool_results.append(result)
+                        logger.debug(f"{log_prefix} Tool {tc['name']}: {json.dumps(result, ensure_ascii=False)[:200]}...")
+                    
+                    # Добавляем результаты в input для следующего запроса
+                    formatted_results = format_tool_results_for_api(tool_calls, tool_results)
+                    
+                    # Обновляем input: добавляем предыдущий ответ и результаты tools
+                    # Для Responses API нужно передать previous_response_id или добавить в input
+                    if hasattr(resp, 'id'):
+                        request_params["previous_response_id"] = resp.id
+                    
+                    # Добавляем результаты tool calls в input
+                    request_params["input"] = formatted_results
+                    
+                    logger.debug(f"{log_prefix} Отправляем результаты tools обратно в модель")
+                    continue
+                
+                # Нет tool calls — извлекаем финальный ответ
+                assistant_response_content = get_text_from_response(resp)
+                if assistant_response_content:
+                    break
+                
+                # Если ответ пустой и нет tool calls — ошибка
+                logger.warning(f"{log_prefix} Ответ пуст и нет tool calls")
+                break
+            
+            if iteration >= MAX_TOOL_ITERATIONS:
+                logger.warning(f"{log_prefix} Достигнут лимит итераций tool calls")
+            
+            if assistant_response_content:
+                await add_message_to_history(user_id, "assistant", assistant_response_content)
+                await log_context_telegram(user_id, user_input, context, assistant_response_content)
+                return assistant_response_content
+            
+            logger.warning(f"{log_prefix} Ответ от Responses API пуст.")
+            await log_context_telegram(user_id, user_input, context, "ОТВЕТ ПУСТ (Responses)")
+            return "Ошибка доставки сообщения. Попробуйте позже."
+            
+        except openai.APIError as e:
+            logger.error(f"{log_prefix} Ошибка OpenAI Responses API: {e}", exc_info=True)
+            return f"Ошибка OpenAI: {str(e)}. Попробуйте позже."
+        except Exception as e:
+            logger.error(f"{log_prefix} Непредвиденная ошибка (Responses): {e}", exc_info=True)
+            await log_context_telegram(user_id, user_input, context, f"НЕПРЕДВИДЕННАЯ ОШИБКА (Responses): {e}")
+            return "Ошибка доставки сообщения. Попробуйте позже."
+
+    # -------------- ЛЕГАСИ-ПУТЬ (Assistants Threads/Runs) --------------
+    thread_id = await get_or_create_thread(user_id)
+    if not thread_id:
+        return "Произошла внутренняя ошибка (не удалось создать или получить тред OpenAI)."
 
     MAX_RETRIES = 2  # всего 2 попытки (первая + одна повторная)
     for attempt in range(1, MAX_RETRIES + 1):
@@ -940,8 +1172,10 @@ async def reset_conversation_command(message: aiogram_types.Message):
         if user_id in user_message_timers:
             timer = user_message_timers.pop(user_id)
             if not timer.done(): timer.cancel()
+        # --- Очищаем thread_id (legacy API) ---
         thread_id = user_threads.pop(user_id, None)
         if thread_id: logger.info(f"Тред {thread_id} для user_id={user_id} удален из памяти (TG).")
+        # --- Очищаем историю в памяти ---
         if user_id in user_messages: del user_messages[user_id]
     # --- Удаляем файл истории пользователя ---
     history_file = os.path.join(HISTORY_DIR, f"history_{user_id}.jsonl")
@@ -951,7 +1185,7 @@ async def reset_conversation_command(message: aiogram_types.Message):
             logger.info(f"Файл истории {history_file} удалён по /reset.")
         except Exception as e:
             logger.error(f"Ошибка удаления файла истории {history_file}: {e}")
-    # --- Сохраняем user_threads после удаления ---
+    # --- Сохраняем соответствия после удаления ---
     save_user_threads_to_file()
     await message.answer("🔄 Диалог сброшен!")
 
@@ -980,9 +1214,9 @@ async def reset_all_command(message: aiogram_types.Message):
             logger.info(f"Файл истории {fname} удалён по /reset_all.")
         except Exception as e:
             logger.error(f"Ошибка удаления файла истории {fname}: {e}")
-    # --- Сохраняем user_threads после очистки ---
+    # --- Сохраняем соответствия после очистки ---
     save_user_threads_to_file()
-    # --- Удаляем файл user_threads.json ---
+    # --- Удаляем файл соответствий тредов ---
     if os.path.exists(USER_THREADS_FILE):
         try:
             os.remove(USER_THREADS_FILE)
@@ -992,10 +1226,9 @@ async def reset_all_command(message: aiogram_types.Message):
     await message.answer(f"🔄 ВСЕ ДИАЛОГИ СБРОШЕНЫ (TG).\n"
                          f"- Таймеров отменено: {timers_cancelled}\n"
                          f"- Буферов очищено: {pending_messages_cleared}\n"
-                         f"- Тредов (память): {threads_cleared}\n"
+                         f"- Тредов (legacy): {threads_cleared}\n"
                          f"- Историй (память): {user_messages_cleared}\n"
-                         f"- Файлы истории удалены: да\n"
-                         f"- user_threads.json удалён: да")
+                         f"- Файлы истории удалены: да")
 
 @router.message(Command("speak"))
 async def speak_command(message: aiogram_types.Message):
@@ -1015,6 +1248,27 @@ async def speak_command(message: aiogram_types.Message):
         logger.info(f"Менеджер/админ {user_id} снял молчание для чата {chat_id} (TG).")
     else:
         await message.answer("ℹ️ Бот уже был активен.")
+
+@router.message(Command("reload_instructions"))
+async def reload_instructions_command(message: aiogram_types.Message):
+    """Перезагружает системные инструкции из файла (только для админа)."""
+    global SYSTEM_INSTRUCTIONS
+    if message.from_user.id != ADMIN_USER_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    
+    old_len = len(SYSTEM_INSTRUCTIONS)
+    SYSTEM_INSTRUCTIONS = load_system_instructions()
+    new_len = len(SYSTEM_INSTRUCTIONS)
+    
+    await message.answer(
+        f"✅ Инструкции перезагружены!\n"
+        f"📄 Файл: {SYSTEM_INSTRUCTIONS_FILE}\n"
+        f"📊 Было: {old_len} символов\n"
+        f"📊 Стало: {new_len} символов\n\n"
+        f"📝 Превью (первые 200 символов):\n{SYSTEM_INSTRUCTIONS[:200]}..."
+    )
+    logger.info(f"Админ {message.from_user.id} перезагрузил системные инструкции ({new_len} символов)")
 
 @router.message(Command("check_db"))
 async def check_database_command(message: aiogram_types.Message):
@@ -1271,7 +1525,7 @@ def cleanup_old_history(days: int = 100):
                 for line in f:
                     try:
                         entry = json.loads(line)
-                        ts = datetime.fromisoformat(entry["timestamp"])
+                        ts = datetime.datetime.fromisoformat(entry["timestamp"])
                         if ts >= cutoff:
                             new_lines.append(line)
                     except Exception:
@@ -1309,7 +1563,7 @@ def load_user_history_from_file(user_id: int, days: int = 100):
         for line in f:
             try:
                 entry = json.loads(line)
-                ts = datetime.fromisoformat(entry["timestamp"])
+                ts = datetime.datetime.fromisoformat(entry["timestamp"])
                 if ts >= cutoff:
                     history.append({
                         'role': entry['role'],
@@ -1320,6 +1574,18 @@ def load_user_history_from_file(user_id: int, days: int = 100):
                 continue
     if history:
         user_messages[user_id] = history
+
+# --- Вспомогательная функция для подсчета пользователей в user_threads.json ---
+def load_threads_count_only() -> int:
+    """Возвращает количество пользователей в user_threads.json без загрузки в память"""
+    if not os.path.exists(USER_THREADS_FILE):
+        return 0
+    try:
+        with open(USER_THREADS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return len(data)
+    except Exception:
+        return 0
 
 # --- Загрузка соответствия user_id ↔ thread_id из файла ---
 def load_user_threads_from_file():
@@ -1372,7 +1638,19 @@ async def replay_history_to_thread(user_id: int, thread_id: str, max_messages: i
 
 async def main():
     logger.info("--- 🚀 Запуск Telegram бота ---")
-    # --- Загружаем user_threads из файла ---
+    logger.info(f"📌 Режим API: {'Responses API' if USE_OPENAI_RESPONSES else 'Assistants API (legacy)'}")
+    logger.info(f"📌 Модель: {OPENAI_MODEL}")
+    if USE_OPENAI_RESPONSES:
+        _is_reasoning = is_reasoning_model(OPENAI_MODEL)
+        logger.info(f"📌 Reasoning-модель: {'Да' if _is_reasoning else 'Нет (chat-модель)'}")
+        if _is_reasoning:
+            logger.info(f"📌 Reasoning effort: {OPENAI_REASONING_EFFORT}")
+            logger.info(f"📌 Text verbosity: {OPENAI_TEXT_VERBOSITY}")
+        logger.info(f"📌 Temperature: {OPENAI_TEMPERATURE if OPENAI_TEMPERATURE is not None else 'default (1)'}")
+        logger.info(f"📌 Max output tokens: {OPENAI_MAX_OUTPUT_TOKENS or 'auto'}")
+        logger.info(f"📌 History limit: {OPENAI_HISTORY_LIMIT} сообщений")
+    
+    # --- Загружаем user_threads из файла (legacy API) ---
     load_user_threads_from_file()
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

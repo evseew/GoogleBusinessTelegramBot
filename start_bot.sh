@@ -34,14 +34,8 @@ echo "🔄 Активируем окружение: $(pwd)/new_venv"
 # Активация окружения
 source "$(pwd)/new_venv/bin/activate"
 
-# Проверка окружения
-if ! python3 -c "import openai" &> /dev/null; then
-    echo "⚠️ Библиотека OpenAI не установлена, устанавливаем..."
-    pip install openai
-fi
-
-# Дополнительно устанавливаем необходимые библиотеки
-pip install langchain-huggingface
+# Важно: не устанавливаем зависимости во время старта (это может подвисать).
+# Все зависимости должны быть установлены заранее: `pip install -r requirements.txt`.
 
 # Проверка наличия файла .env
 if [ ! -f .env ]; then
@@ -81,7 +75,13 @@ echo "✅ Супервизор запущен, PID: $$"
 RESTART_DELAY=5
 while true; do
   echo "▶️ Старт bot.py..."
-  nohup python3 "$SCRIPT_DIR/bot.py" >> logs/bot.log 2>&1 &
+  # Включаем детальное логирование SDK OpenAI
+  export OPENAI_LOG=debug
+  export PYTHONASYNCIODEBUG=1
+  export PYTHONUNBUFFERED=1
+  # Маркер начала нового цикла супервизора в общем логе
+  echo -e "\n----- [SUPERVISOR CYCLE START] $(date) -----" >> "$SCRIPT_DIR/logs/bot.log"
+  nohup "$SCRIPT_DIR/new_venv/bin/python" "$SCRIPT_DIR/bot.py" >> logs/bot.log 2>&1 &
   CHILD_PID=$!
   echo "👶 Дочерний PID: $CHILD_PID"
 

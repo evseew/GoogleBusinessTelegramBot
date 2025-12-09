@@ -11,15 +11,17 @@ __pycache__/
 .pytest_cache/
 
 # Логи и временные файлы
-logs/context_logs_telegram/ # Игнорировать всю директорию логов контекста
-# Если вы хотите сохранять пустую директорию logs/ в Git:
-# logs/*
-# !logs/.gitkeep
+logs/
 *.log
 *.pid
 
 # Локальная база данных векторов
-local_vector_db_telegram/ # Игнорировать всю директорию базы данных
+local_vector_db/
+local_vector_db_telegram/
+
+# История чатов и данные пользователей
+history/
+user_threads.json
 
 # Файл состояния режима молчания
 telegram_silence_state.json
