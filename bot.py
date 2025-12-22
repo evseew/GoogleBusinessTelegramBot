@@ -42,6 +42,8 @@ from tools import (
     format_tool_results_for_api,
     has_tool_calls,
     get_text_from_response,
+    reset_verification,
+    get_all_verifications,
 )
 
 # --- Custom AsyncRLock Implementation (for Python < 3.9) ---
@@ -332,7 +334,6 @@ router = Router()
 logger.info("Telegram бот инициализирован")
 
 # --- Global State (In-Memory) ---
-user_threads: Dict[int, str] = {} 
 user_messages: Dict[int, List[Dict[str, Any]]] = {} 
 
 pending_messages: Dict[int, List[str]] = {}  
@@ -510,35 +511,6 @@ def download_text_sync(service, file_id) -> str:
               return ""
 
 # --- Helper Functions ---
-async def get_or_create_thread(user_id: int) -> Optional[str]:
-    if user_id in user_threads:
-        thread_id = user_threads[user_id]
-        try:
-            await openai_client.beta.threads.messages.list(thread_id=thread_id, limit=1)
-            logger.info(f"Используем существующий тред {thread_id} для user_id={user_id} (TG)")
-            return thread_id
-        except openai.NotFoundError:
-            logger.warning(f"Тред {thread_id} не найден в OpenAI для user_id={user_id} (TG). Создаем новый.")
-            if user_id in user_threads: del user_threads[user_id]
-            save_user_threads_to_file()
-        except Exception as e:
-            logger.error(f"Ошибка доступа к треду {thread_id} для user_id={user_id} (TG): {e}. Создаем новый.")
-            if user_id in user_threads: del user_threads[user_id]
-            save_user_threads_to_file()
-    try:
-        logger.info(f"Создаем новый тред для user_id={user_id} (TG)...")
-        thread = await openai_client.beta.threads.create()
-        thread_id = thread.id
-        user_threads[user_id] = thread_id
-        save_user_threads_to_file()
-        user_messages[user_id] = [] 
-        logger.info(f"Создан новый тред {thread_id} для user_id={user_id} (TG)")
-        # --- Досылаем историю в новый тред ---
-        await replay_history_to_thread(user_id, thread_id, max_messages=30)
-        return thread_id
-    except Exception as e:
-        logger.error(f"Критическая ошибка при создании нового треда для user_id={user_id} (TG): {e}", exc_info=True)
-        return None
 
 async def cleanup_old_messages_in_memory(): 
     current_time = datetime.datetime.now()
@@ -876,107 +848,9 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
             await log_context_telegram(user_id, user_input, context, f"НЕПРЕДВИДЕННАЯ ОШИБКА (Responses): {e}")
             return "Ошибка доставки сообщения. Попробуйте позже."
 
-    # -------------- ЛЕГАСИ-ПУТЬ (Assistants Threads/Runs) --------------
-    thread_id = await get_or_create_thread(user_id)
-    if not thread_id:
-        return "Произошла внутренняя ошибка (не удалось создать или получить тред OpenAI)."
-
-    MAX_RETRIES = 2  # всего 2 попытки (первая + одна повторная)
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            logger.debug(f"{log_prefix} Попытка {attempt} отправки запроса в OpenAI...")
-            # --- основной блок отправки запроса (скопировано из текущей реализации) ---
-            logger.debug(f"{log_prefix} Проверка активных runs для треда {thread_id} ПЕРЕД созданием нового сообщения...")
-            active_runs_response = await openai_client.beta.threads.runs.list(thread_id=thread_id)
-            active_runs_to_cancel = [run for run in active_runs_response.data if run.status in ['queued', 'in_progress', 'requires_action']]
-            if active_runs_to_cancel:
-                logger.warning(f"{log_prefix} Найдено {len(active_runs_to_cancel)} активных/ожидающих runs. Отменяем...")
-                for run_to_cancel in active_runs_to_cancel:
-                    try:
-                        logger.debug(f"{log_prefix} Попытка отменить run {run_to_cancel.id}...")
-                        await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=run_to_cancel.id)
-                        logger.info(f"{log_prefix} Отменен run {run_to_cancel.id}")
-                    except Exception as cancel_error: logger.warning(f"{log_prefix} Не удалось отменить run {run_to_cancel.id}: {cancel_error}")
-            logger.debug(f"{log_prefix} Проверка активных runs ЗАВЕРШЕНА.")
-            
-            logger.debug(f"{log_prefix} Попытка создать сообщение в треде {thread_id}...")
-            await openai_client.beta.threads.messages.create(thread_id=thread_id, role="user", content=full_prompt)
-            logger.info(f"{log_prefix} Сообщение добавлено в тред {thread_id}. Попытка запустить run...")
-
-            current_run = await openai_client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
-            logger.info(f"{log_prefix} Запущен новый run {current_run.id}. Начало опроса статуса...")
-
-            start_time = time.time()
-            run_completed_successfully = False
-            while time.time() - start_time < OPENAI_RUN_TIMEOUT_SECONDS:
-                await asyncio.sleep(1.5) 
-                run_status = await openai_client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=current_run.id)
-                logger.debug(f"{log_prefix} Статус run {current_run.id}: {run_status.status}")
-                if run_status.status == 'completed':
-                    logger.info(f"{log_prefix} Run {current_run.id} успешно завершен.")
-                    run_completed_successfully = True
-                    break
-                elif run_status.status in ['failed', 'cancelled', 'expired']:
-                    error_message_detail = f"Run {current_run.id} статус '{run_status.status}'."
-                    last_error = getattr(run_status, 'last_error', None)
-                    if last_error: error_message_detail += f" Ошибка: {last_error.message} (Код: {last_error.code})"
-                    logger.error(f"{log_prefix} {error_message_detail}")
-                    await log_context_telegram(user_id, user_input, context, f"ОШИБКА OPENAI: {error_message_detail}")
-                    break  # не retry, а сразу выход
-                elif run_status.status == 'requires_action':
-                     logger.warning(f"{log_prefix} Run {current_run.id} требует действия (Function Calling?).")
-                     await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=current_run.id)
-                     await log_context_telegram(user_id, user_input, context, "ОШИБКА OPENAI: requires_action")
-                     break  # не retry, а сразу выход
-            
-            if not run_completed_successfully:
-                logger.warning(f"{log_prefix} Таймаут ({OPENAI_RUN_TIMEOUT_SECONDS}s) для run {current_run.id}")
-                try:
-                    await openai_client.beta.threads.runs.cancel(thread_id=thread_id, run_id=current_run.id)
-                    logger.info(f"{log_prefix} Отменен run {current_run.id} из-за таймаута.")
-                except Exception as cancel_error: logger.warning(f"{log_prefix} Ошибка отмены run {current_run.id} после таймаута: {cancel_error}")
-                await log_context_telegram(user_id, user_input, context, "ОШИБКА OPENAI: Таймаут")
-                if attempt < MAX_RETRIES:
-                    logger.info(f"{log_prefix} Повторная попытка через 2 секунды...")
-                    await asyncio.sleep(2)
-                    continue
-                else:
-                    return "Ошибка доставки сообщения. Попробуйте позже."
-
-            messages_response = await openai_client.beta.threads.messages.list(thread_id=thread_id, order="desc", limit=5)
-            assistant_response_content = None
-            for msg in messages_response.data:
-                if msg.role == "assistant" and msg.run_id == current_run.id:
-                    if msg.content and msg.content[0].type == 'text': # Предполагаем один текстовый блок
-                        assistant_response_content = msg.content[0].text.value
-                        logger.info(f"{log_prefix} Получен релевантный ответ: {assistant_response_content[:100]}...")
-                        break
-            
-            if assistant_response_content:
-                await add_message_to_history(user_id, "assistant", assistant_response_content)
-                await log_context_telegram(user_id, user_input, context, assistant_response_content)
-                return assistant_response_content
-            else:
-                logger.warning(f"{log_prefix} Текстовый ответ от ассистента для run {current_run.id} не найден.")
-                await log_context_telegram(user_id, user_input, context, "ОТВЕТ АССИСТЕНТА НЕ НАЙДЕН ИЛИ ПУСТ")
-                return "Ошибка доставки сообщения. Попробуйте позже."
-        except openai.APIError as e: # Более общая ошибка API OpenAI
-            logger.error(f"{log_prefix} Ошибка OpenAI API: {e}", exc_info=True)
-            if attempt < MAX_RETRIES:
-                logger.info(f"{log_prefix} Повторная попытка через 2 секунды после ошибки OpenAI API...")
-                await asyncio.sleep(2)
-                continue
-            else:
-                return f"Ошибка OpenAI: {str(e)}. Попробуйте позже."
-        except Exception as e:
-            logger.error(f"{log_prefix} Непредвиденная ошибка: {e}", exc_info=True)
-            await log_context_telegram(user_id, user_input, context, f"НЕПРЕДВИДЕННАЯ ОШИБКА: {e}")
-            if attempt < MAX_RETRIES:
-                logger.info(f"{log_prefix} Повторная попытка через 2 секунды после непредвиденной ошибки...")
-                await asyncio.sleep(2)
-                continue
-            else:
-                return "Ошибка доставки сообщения. Попробуйте позже."
+    # Если Responses API недоступен, возвращаем ошибку
+    logger.error(f"{log_prefix} Responses API недоступен, а legacy Threads/Runs API удалён.")
+    return "Ошибка конфигурации системы. Обратитесь к администратору."
 
 # --- Vector Store Management (ChromaDB) ---
 async def get_relevant_context_telegram(query: str, k: int) -> str:
@@ -1255,9 +1129,6 @@ async def reset_conversation_command(message: aiogram_types.Message):
         if user_id in user_message_timers:
             timer = user_message_timers.pop(user_id)
             if not timer.done(): timer.cancel()
-        # --- Очищаем thread_id (legacy API) ---
-        thread_id = user_threads.pop(user_id, None)
-        if thread_id: logger.info(f"Тред {thread_id} для user_id={user_id} удален из памяти (TG).")
         # --- Очищаем историю в памяти ---
         if user_id in user_messages: del user_messages[user_id]
     # --- Удаляем файл истории пользователя ---
@@ -1268,8 +1139,6 @@ async def reset_conversation_command(message: aiogram_types.Message):
             logger.info(f"Файл истории {history_file} удалён по /reset.")
         except Exception as e:
             logger.error(f"Ошибка удаления файла истории {history_file}: {e}")
-    # --- Сохраняем соответствия после удаления ---
-    save_user_threads_to_file()
     await message.answer("🔄 Диалог сброшен!")
 
 @router.message(Command("reset_all"))
@@ -1286,8 +1155,6 @@ async def reset_all_command(message: aiogram_types.Message):
     user_message_timers.clear()
     pending_messages_cleared = len(pending_messages)
     pending_messages.clear()
-    threads_cleared = len(user_threads)
-    user_threads.clear()
     user_messages_cleared = len(user_messages)
     user_messages.clear()
     # --- Удаляем все файлы истории ---
@@ -1297,19 +1164,9 @@ async def reset_all_command(message: aiogram_types.Message):
             logger.info(f"Файл истории {fname} удалён по /reset_all.")
         except Exception as e:
             logger.error(f"Ошибка удаления файла истории {fname}: {e}")
-    # --- Сохраняем соответствия после очистки ---
-    save_user_threads_to_file()
-    # --- Удаляем файл соответствий тредов ---
-    if os.path.exists(USER_THREADS_FILE):
-        try:
-            os.remove(USER_THREADS_FILE)
-            logger.info(f"Файл {USER_THREADS_FILE} удалён по /reset_all.")
-        except Exception as e:
-            logger.error(f"Ошибка удаления {USER_THREADS_FILE}: {e}")
     await message.answer(f"🔄 ВСЕ ДИАЛОГИ СБРОШЕНЫ (TG).\n"
                          f"- Таймеров отменено: {timers_cancelled}\n"
                          f"- Буферов очищено: {pending_messages_cleared}\n"
-                         f"- Тредов (legacy): {threads_cleared}\n"
                          f"- Историй (память): {user_messages_cleared}\n"
                          f"- Файлы истории удалены: да")
 
@@ -1384,6 +1241,56 @@ async def check_database_command(message: aiogram_types.Message):
         except Exception as e: report.append(f"❌ Ошибка прямого доступа: {e}")
     
     await message.answer("\n".join(report))
+
+@router.message(Command("reset_verification"))
+async def reset_verification_command(message: aiogram_types.Message):
+    """
+    Сбросить верификацию клиента.
+    
+    Использование:
+    /reset_verification           - Сбросить ВСЕ верификации
+    /reset_verification 46168     - Сбросить только логин 46168
+    """
+    user_id = message.from_user.id
+    
+    # Извлекаем аргументы команды (если есть)
+    command_args = message.text.split(maxsplit=1)
+    client_login = None
+    
+    if len(command_args) > 1:
+        # Есть аргумент - логин для сброса
+        client_login = command_args[1].strip()
+        logger.info(f"Команда /reset_verification от user_id={user_id} для логина {client_login}")
+    else:
+        logger.info(f"Команда /reset_verification от user_id={user_id} (сброс всех)")
+    
+    try:
+        result = await asyncio.to_thread(reset_verification, user_id, client_login)
+        await message.answer(result)
+        
+        if client_login:
+            logger.info(f"Верификация сброшена для user_id={user_id}, login={client_login}")
+        else:
+            logger.info(f"Все верификации сброшены для user_id={user_id}")
+    except Exception as e:
+        logger.error(f"Ошибка сброса верификации для user_id={user_id}: {e}", exc_info=True)
+        await message.answer("❌ Ошибка сброса верификации. Попробуйте позже.")
+
+@router.message(Command("list_verifications"))
+async def list_verifications_command(message: aiogram_types.Message):
+    """Показать все верификации (только для админа)."""
+    if message.from_user.id != ADMIN_USER_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    
+    logger.info(f"Админ {ADMIN_USER_ID} запросил список верификаций")
+    
+    try:
+        result = await asyncio.to_thread(get_all_verifications)
+        await message.answer(result)
+    except Exception as e:
+        logger.error(f"Ошибка получения списка верификаций: {e}", exc_info=True)
+        await message.answer("❌ Ошибка получения списка верификаций.")
 
 # --- Message Handlers ---
 # Важно: хендлеры команд должны быть зарегистрированы в router ДО общих хендлеров сообщений,
@@ -1582,8 +1489,6 @@ async def shutdown(signal_obj, loop):
 HISTORY_DIR = "history"
 os.makedirs(HISTORY_DIR, exist_ok=True)
 
-USER_THREADS_FILE = "user_threads.json"
-
 # Сохраняет сообщение в историю пользователя
 def add_message_to_file_history(user_id: int, role: str, content: str):
     filename = os.path.join(HISTORY_DIR, f"history_{user_id}.jsonl")
@@ -1658,66 +1563,6 @@ def load_user_history_from_file(user_id: int, days: int = 100):
     if history:
         user_messages[user_id] = history
 
-# --- Вспомогательная функция для подсчета пользователей в user_threads.json ---
-def load_threads_count_only() -> int:
-    """Возвращает количество пользователей в user_threads.json без загрузки в память"""
-    if not os.path.exists(USER_THREADS_FILE):
-        return 0
-    try:
-        with open(USER_THREADS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return len(data)
-    except Exception:
-        return 0
-
-# --- Загрузка соответствия user_id ↔ thread_id из файла ---
-def load_user_threads_from_file():
-    global user_threads
-    if os.path.exists(USER_THREADS_FILE):
-        try:
-            with open(USER_THREADS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                user_threads.clear()
-                for k, v in data.items():
-                    try:
-                        user_threads[int(k)] = v
-                    except Exception:
-                        continue
-        except Exception as e:
-            logger.error(f"Ошибка загрузки user_threads из файла: {e}")
-
-# --- Сохранение соответствия user_id ↔ thread_id в файл ---
-def save_user_threads_to_file():
-    try:
-        with open(USER_THREADS_FILE, "w", encoding="utf-8") as f:
-            json.dump({str(k): v for k, v in user_threads.items()}, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Ошибка сохранения user_threads в файл: {e}")
-
-# --- Досылка истории в новый тред OpenAI ---
-async def replay_history_to_thread(user_id: int, thread_id: str, max_messages: int = 20):
-    filename = os.path.join(HISTORY_DIR, f"history_{user_id}.jsonl")
-    if not os.path.exists(filename):
-        return
-    history = []
-    with open(filename, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                entry = json.loads(line)
-                history.append(entry)
-            except Exception:
-                continue
-    # Берём только последние max_messages
-    history = history[-max_messages:]
-    for msg in history:
-        try:
-            await openai_client.beta.threads.messages.create(
-                thread_id=thread_id,
-                role=msg['role'],
-                content=msg['content']
-            )
-        except Exception as e:
-            logger.error(f"Ошибка досылки истории в тред {thread_id}: {e}")
 
 async def main():
     logger.info("--- 🚀 Запуск Telegram бота ---")
@@ -1732,9 +1577,9 @@ async def main():
         logger.info(f"📌 Temperature: {OPENAI_TEMPERATURE if OPENAI_TEMPERATURE is not None else 'default (1)'}")
         logger.info(f"📌 Max output tokens: {OPENAI_MAX_OUTPUT_TOKENS or 'auto'}")
         logger.info(f"📌 History limit: {OPENAI_HISTORY_LIMIT} сообщений")
-    
-    # --- Загружаем user_threads из файла (legacy API) ---
-    load_user_threads_from_file()
+    else:
+        logger.warning("⚠️ USE_OPENAI_RESPONSES=False, но legacy Threads/Runs API удалён. Бот может не работать корректно!")
+        logger.warning("⚠️ Установите USE_OPENAI_RESPONSES=True в .env файле")
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s, loop)))

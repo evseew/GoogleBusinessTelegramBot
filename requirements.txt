@@ -3,6 +3,9 @@
 aiogram>=3.0.0
 aiohttp>=3.9.0
 python-dotenv>=1.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
 
 # База данных векторов
 langchain>=0.0.267

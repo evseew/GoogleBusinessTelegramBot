@@ -31,6 +31,31 @@ from .pyrus_tools import (
     get_pyrus_tool_for_responses_api,
     PYRUS_FUNCTION_NAME,
 )
+from .client_tools import (
+    search_client_by_name,
+    find_clients_by_phone,
+    get_client_balance,
+    get_recent_transactions,
+    TOOLS as CLIENT_TOOLS_DEFINITIONS,
+    get_search_client_tool_for_responses_api,
+    get_find_by_phone_tool_for_responses_api,
+    get_client_balance_tool_for_responses_api,
+    get_recent_transactions_tool_for_responses_api,
+    SEARCH_CLIENT_FUNCTION_NAME,
+    FIND_BY_PHONE_FUNCTION_NAME,
+    GET_BALANCE_FUNCTION_NAME,
+    GET_TRANSACTIONS_FUNCTION_NAME,
+)
+from .verification_tools import (
+    check_verification,
+    save_verification,
+    reset_verification,
+    VERIFICATION_TOOLS,
+    get_check_verification_tool_for_responses_api,
+    get_save_verification_tool_for_responses_api,
+    CHECK_VERIFICATION_FUNCTION_NAME,
+    SAVE_VERIFICATION_FUNCTION_NAME,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +67,8 @@ AVAILABLE_TOOLS_CHAT: List[Dict[str, Any]] = [
     PRICES_TOOL_DEFINITION,
     GROUPS_TOOL_DEFINITION,
     PYRUS_TOOL_DEFINITION,
+    *CLIENT_TOOLS_DEFINITIONS,  # Добавляем инструменты для работы с клиентами из 1С
+    *VERIFICATION_TOOLS,  # Инструменты верификации клиентов
 ]
 
 # Маппинг имён функций на реальные функции
@@ -50,6 +77,15 @@ TOOL_FUNCTIONS: Dict[str, Callable] = {
     "get_prices": get_prices,
     "search_groups": search_groups,
     "create_pyrus_task": create_pyrus_task,
+    # Функции для работы с данными клиентов из 1С
+    "search_client_by_name": search_client_by_name,
+    "find_clients_by_phone": find_clients_by_phone,
+    "get_client_balance": get_client_balance,
+    "get_recent_transactions": get_recent_transactions,
+    # Функции верификации клиентов
+    "check_verification": check_verification,
+    "save_verification": save_verification,
+    "reset_verification": reset_verification,
 }
 
 
@@ -69,6 +105,14 @@ def get_tools_for_api(api_type: str = "responses") -> List[Dict[str, Any]]:
             get_prices_tool_for_responses_api(),
             get_groups_tool_for_responses_api(),
             get_pyrus_tool_for_responses_api(),
+            # Инструменты для работы с клиентами
+            get_find_by_phone_tool_for_responses_api(),
+            get_search_client_tool_for_responses_api(),
+            get_client_balance_tool_for_responses_api(),
+            get_recent_transactions_tool_for_responses_api(),
+            # Инструменты верификации
+            get_check_verification_tool_for_responses_api(),
+            get_save_verification_tool_for_responses_api(),
         ]
 
 

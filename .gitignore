@@ -13,18 +13,36 @@ __pycache__/
 # Логи и временные файлы
 logs/
 *.log
+*.log.*
+*.log.gz
 *.pid
+logrotate.state
 
 # Локальная база данных векторов
 local_vector_db/
 local_vector_db_telegram/
 
+# Данные из 1С (XML и JSON)
+data/xml/
+data/clients.json
+data/contracts.json
+data/transactions.json
+
+# Тестовые файлы и загрузки
+test_downloads/
+bitrix_page.html
+files_page.html
+auth_response.html
+test_bitrix_access.py
+
 # История чатов и данные пользователей
 history/
-user_threads.json
 
 # Файл состояния режима молчания
 telegram_silence_state.json
+
+# Верификации клиентов (персональные данные)
+data/verified_clients.json
 
 # Редакторы и IDE
 .vscode/
