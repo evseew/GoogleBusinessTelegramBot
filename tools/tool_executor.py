@@ -19,6 +19,18 @@ from .price_tools import (
     get_prices_tool_for_responses_api,
     PRICES_FUNCTION_NAME,
 )
+from .group_tools import (
+    search_groups,
+    GROUPS_TOOL_DEFINITION,
+    get_groups_tool_for_responses_api,
+    GROUPS_FUNCTION_NAME,
+)
+from .pyrus_tools import (
+    create_pyrus_task,
+    PYRUS_TOOL_DEFINITION,
+    get_pyrus_tool_for_responses_api,
+    PYRUS_FUNCTION_NAME,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +40,16 @@ logger = logging.getLogger(__name__)
 AVAILABLE_TOOLS_CHAT: List[Dict[str, Any]] = [
     BRANCHES_TOOL_DEFINITION,
     PRICES_TOOL_DEFINITION,
+    GROUPS_TOOL_DEFINITION,
+    PYRUS_TOOL_DEFINITION,
 ]
 
 # Маппинг имён функций на реальные функции
 TOOL_FUNCTIONS: Dict[str, Callable] = {
     "get_branches": get_branches,
     "get_prices": get_prices,
+    "search_groups": search_groups,
+    "create_pyrus_task": create_pyrus_task,
 }
 
 
@@ -51,6 +67,8 @@ def get_tools_for_api(api_type: str = "responses") -> List[Dict[str, Any]]:
         return [
             get_branches_tool_for_responses_api(),
             get_prices_tool_for_responses_api(),
+            get_groups_tool_for_responses_api(),
+            get_pyrus_tool_for_responses_api(),
         ]
 
 

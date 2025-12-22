@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Перейти в директорию бота
-cd /root/GoogleBusinessTelegramBot || exit 1
+cd /Users/test/Local_code/GoogleBusinessBot || exit 1
 
 # Активировать виртуальное окружение
 source new_venv/bin/activate || exit 1 

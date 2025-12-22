@@ -272,14 +272,40 @@ if missing_vars_list:
 
 # --- Setup Logging ---
 os.makedirs(LOGS_DIR, exist_ok=True)
-logging.basicConfig(
-    level=logging.DEBUG, # ИЗМЕНЕНО: Установите DEBUG для более подробного логирования
-    format='%(asctime)s - %(levelname)s - %(name)s - %(funcName)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+os.makedirs("logs", exist_ok=True)
+
+# Формат логов
+log_format = '[%(asctime)s - %(name)s:%(lineno)d - %(levelname)s] %(message)s'
+log_formatter = logging.Formatter(log_format, datefmt='%Y-%m-%d %H:%M:%S')
+
+# Настраиваем root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Handler для stdout (консоль)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(log_formatter)
+
+# Handler для файла logs/bot.log
+file_handler = logging.FileHandler("logs/bot.log", encoding="utf-8")
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(log_formatter)
+
+# Очищаем существующие handlers и добавляем новые
+root_logger.handlers.clear()
+root_logger.addHandler(console_handler)
+root_logger.addHandler(file_handler)
+
+# Уменьшаем шум от сторонних библиотек
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("chromadb").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
+logger.info("=== БОТ ЗАПУСКАЕТСЯ ===")
 
 # --- Initialize API Clients ---
 try:
@@ -303,6 +329,7 @@ except Exception as e:
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
+logger.info("Telegram бот инициализирован")
 
 # --- Global State (In-Memory) ---
 user_threads: Dict[int, str] = {} 
@@ -1165,6 +1192,59 @@ async def update_knowledge_command(message: aiogram_types.Message):
     await message.answer("🔄 Обновляю базу знаний (TG)...")
     asyncio.create_task(run_update_and_notify_telegram(ADMIN_USER_ID))
 
+
+@router.message(Command("update_groups"))
+async def update_groups_command(message: aiogram_types.Message):
+    """Обновляет groups.json из Google Sheets (только для админа)."""
+    if message.from_user.id != ADMIN_USER_ID:
+        await message.answer("❌ Нет прав!")
+        return
+    
+    await message.answer("🔄 Обновляю список групп из Google Sheets...")
+    
+    async def run_update():
+        try:
+            # Запускаем скрипт обновления в отдельном потоке
+            import subprocess
+            script_path = os.path.join(os.path.dirname(__file__), "scripts", "update_groups.py")
+            
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["python", script_path],
+                capture_output=True,
+                text=True,
+                timeout=120  # 2 минуты таймаут
+            )
+            
+            if result.returncode == 0:
+                # Извлекаем статистику из вывода
+                output_lines = result.stdout.strip().split('\n')
+                stats_lines = [l for l in output_lines if '📌' in l or '✅' in l or 'групп' in l.lower()]
+                stats_summary = '\n'.join(stats_lines[-5:]) if stats_lines else "Обновление завершено"
+                
+                await bot.send_message(
+                    ADMIN_USER_ID,
+                    f"✅ Список групп обновлён!\n\n{stats_summary}"
+                )
+                logger.info("Группы успешно обновлены через команду /update_groups")
+            else:
+                error_msg = result.stderr[:500] if result.stderr else "Неизвестная ошибка"
+                await bot.send_message(
+                    ADMIN_USER_ID,
+                    f"❌ Ошибка обновления групп:\n{error_msg}"
+                )
+                logger.error(f"Ошибка обновления групп: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            await bot.send_message(ADMIN_USER_ID, "❌ Таймаут: обновление заняло больше 2 минут")
+            logger.error("Таймаут при обновлении групп")
+        except Exception as e:
+            await bot.send_message(ADMIN_USER_ID, f"❌ Ошибка: {e}")
+            logger.error(f"Ошибка при обновлении групп: {e}", exc_info=True)
+    
+    asyncio.create_task(run_update())
+
+
 @router.message(Command("reset"))
 async def reset_conversation_command(message: aiogram_types.Message):
     user_id = message.from_user.id
@@ -1659,13 +1739,17 @@ async def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s, loop)))
 
+    logger.info("🔗 Инициализация Google Drive...")
     get_drive_service_sync()
     if not drive_service_instance:
         logger.critical("КРИТИЧЕСКАЯ ОШИБКА: Google Drive не инициализирован. Остановка.")
         remove_pid_files(); return
 
     await load_silence_state_from_file()
+    
+    logger.info("📚 Загрузка векторной базы знаний (ChromaDB)...")
     await _initialize_active_vector_collection_telegram()
+    logger.info("✅ Векторная база знаний готова")
     
     if ENABLE_STARTUP_KB_UPDATE and ADMIN_USER_ID: # Запускаем обновление только если флаг включен
         logger.info("Запуск первоначального обновления БЗ (TG) включен флагом окружения.")

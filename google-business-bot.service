@@ -8,12 +8,12 @@ StartLimitIntervalSec=0
 Type=simple
 User=root
 # УКАЖИТЕ РЕАЛЬНЫЙ ПУТЬ К ПРОЕКТУ НА СЕРВЕРЕ
-WorkingDirectory=/root/GoogleBusinessTelegramBot
+WorkingDirectory=/Users/test/Local_code/GoogleBusinessBot
 # Экспортируем PATH, чтобы использовать интерпретатор из venv
-Environment="PATH=/root/GoogleBusinessTelegramBot/new_venv/bin"
+Environment="PATH=/Users/test/Local_code/GoogleBusinessBot/new_venv/bin"
 # УКАЖИТЕ РЕАЛЬНЫЙ ПУТЬ К .env
-EnvironmentFile=/root/GoogleBusinessTelegramBot/.env
-ExecStart=/root/GoogleBusinessTelegramBot/new_venv/bin/python /root/GoogleBusinessTelegramBot/bot.py
+EnvironmentFile=/Users/test/Local_code/GoogleBusinessBot/.env
+ExecStart=/Users/test/Local_code/GoogleBusinessBot/new_venv/bin/python /Users/test/Local_code/GoogleBusinessBot/bot.py
 
 # Самовосстановление
 Restart=always
@@ -22,12 +22,12 @@ TimeoutStartSec=180
 TimeoutStopSec=30
 
 # Логи в файлы (можно закомментировать и использовать journalctl)
-StandardOutput=append:/root/GoogleBusinessTelegramBot/logs/bot.log
-StandardError=append:/root/GoogleBusinessTelegramBot/logs/bot_error.log
+StandardOutput=append:/Users/test/Local_code/GoogleBusinessBot/logs/bot.log
+StandardError=append:/Users/test/Local_code/GoogleBusinessBot/logs/bot_error.log
 
 # Создаем необходимые директории
-ExecStartPre=/bin/mkdir -p /root/GoogleBusinessTelegramBot/logs
-ExecStartPre=/bin/mkdir -p /root/GoogleBusinessTelegramBot/logs/context_logs
+ExecStartPre=/bin/mkdir -p /Users/test/Local_code/GoogleBusinessBot/logs
+ExecStartPre=/bin/mkdir -p /Users/test/Local_code/GoogleBusinessBot/logs/context_logs
 
 # Уведомление админу при падении, если systemd переведет сервис в failed
 OnFailure=google-business-bot-notify@%n.service

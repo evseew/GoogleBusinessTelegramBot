@@ -5,10 +5,10 @@ After=network.target
 [Service]
 Type=oneshot
 User=root
-WorkingDirectory=/root/GoogleBusinessTelegramBot
-Environment="PATH=/root/GoogleBusinessTelegramBot/new_venv/bin"
-EnvironmentFile=/root/GoogleBusinessTelegramBot/.env
-ExecStart=/root/GoogleBusinessTelegramBot/new_venv/bin/python /root/GoogleBusinessTelegramBot/update_kb.py
+WorkingDirectory=/Users/test/Local_code/GoogleBusinessBot
+Environment="PATH=/Users/test/Local_code/GoogleBusinessBot/new_venv/bin"
+EnvironmentFile=/Users/test/Local_code/GoogleBusinessBot/.env
+ExecStart=/Users/test/Local_code/GoogleBusinessBot/new_venv/bin/python /Users/test/Local_code/GoogleBusinessBot/update_kb.py
 TimeoutStartSec=600
 StandardOutput=journal
 StandardError=journal

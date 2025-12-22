@@ -63,3 +63,4 @@ print(f"  - Embeddings: {len(embedding_models)}")
 print(f"  - Другие: {len(other_models)}")
 print("=" * 60)
 
+
