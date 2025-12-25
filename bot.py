@@ -44,6 +44,10 @@ from tools import (
     get_text_from_response,
     reset_verification,
     get_all_verifications,
+    get_conversation_topic,
+    clear_conversation_topic,
+    set_current_user_id,
+    conversation_topics_storage as current_product_context,
 )
 
 # --- Custom AsyncRLock Implementation (for Python < 3.9) ---
@@ -340,7 +344,18 @@ pending_messages: Dict[int, List[str]] = {}
 user_message_timers: Dict[int, asyncio.Task] = {}  
 user_processing_locks: defaultdict[int, AsyncRLock] = defaultdict(AsyncRLock) # <--- ИЗМЕНЕНО: Используем наш AsyncRLock
 
-chat_silence_state: Dict[int, bool] = {} 
+chat_silence_state: Dict[int, bool] = {}
+
+# Контекст текущего ребёнка для каждого пользователя
+current_child_context: Dict[int, str] = {}
+# Формат: {telegram_user_id: "client_login"}
+# Пример: {164266775: "44741"}
+
+# Контекст текущего продукта/темы для каждого пользователя
+# Импортирован из tools.conversation_tools как current_product_context
+# Формат: {telegram_user_id: "название темы"}
+# Пример: {164266775: "математика STEM"}
+# Управляется через функцию set_conversation_topic (вызывается LLM) 
 
 # --- Vector Store (ChromaDB) ---
 vector_collection: Optional[chromadb.api.models.Collection.Collection] = None
@@ -702,11 +717,23 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
     if USE_OPENAI_RESPONSES and not use_responses:
         logger.warning(f"{log_prefix} USE_OPENAI_RESPONSES=True, но клиент не поддерживает Responses API. Фоллбек на Threads/Runs.")
 
+    # 🆕 Получаем текущую тему диалога (если установлена)
+    current_topic = get_conversation_topic(user_id)
+    if current_topic:
+        logger.info(f"{log_prefix} Текущая тема диалога: '{current_topic}'")
+    
     context = ""
     if USE_VECTOR_STORE and vector_collection:
         logger.debug(f"{log_prefix} Попытка получить контекст из векторной базы...")
-        try: context = await get_relevant_context_telegram(user_input, k=RELEVANT_CONTEXT_COUNT)
-        except Exception as e_ctx: logger.error(f"{log_prefix} Ошибка получения контекста: {e_ctx}", exc_info=True)
+        try:
+            context = await get_relevant_context_telegram(
+                user_input, 
+                k=RELEVANT_CONTEXT_COUNT,
+                conversation_topic=current_topic,  # 🔥 Передаём тему!
+                user_id=user_id
+            )
+        except Exception as e_ctx:
+            logger.error(f"{log_prefix} Ошибка получения контекста: {e_ctx}", exc_info=True)
         logger.debug(f"{log_prefix} Контекст из векторной базы получен (или пуст).")
 
     full_prompt = user_input
@@ -720,9 +747,69 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
     else:
         logger.info(f"{log_prefix} Контекст не найден или база знаний отключена.")
 
-    # --- ДОБАВЛЯЕМ ДАТУ И ВРЕМЯ В НАЧАЛО PROMPT ---
+    # --- ДОБАВЛЯЕМ ДАТУ, ВРЕМЯ И TELEGRAM_USER_ID В НАЧАЛО PROMPT ---
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    full_prompt = f"Сегодня: {now_str}.\n" + full_prompt
+    
+    # --- АВТОМАТИЧЕСКАЯ ЗАГРУЗКА КОНТЕКСТА КЛИЕНТА ---
+    # Проверяем, верифицирован ли клиент, и если да - добавляем данные о родителе и ребёнке
+    client_context_info = ""
+    try:
+        from tools.verification_tools import get_client_context
+        client_ctx = get_client_context(user_id)
+        
+        if client_ctx.get("is_verified") and client_ctx.get("login"):
+            # Клиент верифицирован - формируем контекст
+            client_name = client_ctx.get("client_name", "")
+            student_name = client_ctx.get("student_name", "")
+            branch = client_ctx.get("branch", "")
+            group = client_ctx.get("group", "")
+            teacher = client_ctx.get("teacher", "")
+            login = client_ctx.get("login", "")
+            
+            client_context_info = f"""
+=== ДАННЫЕ ВЕРИФИЦИРОВАННОГО КЛИЕНТА ===
+👤 Родитель (обращайся по имени-отчеству): {client_name}
+👶 Ребёнок (называй по имени): {student_name}
+📱 Логин: {login}
+🏫 Филиал: {branch}
+👥 Группа: {group}
+👩‍🏫 Преподаватель: {teacher}
+
+⚠️ ОБЯЗАТЕЛЬНО используй это имя родителя ({client_name}) при обращении!
+==========================================
+"""
+            logger.info(f"{log_prefix} ✅ Добавлен контекст верифицированного клиента: {client_name}, ребёнок: {student_name}")
+        else:
+            logger.debug(f"{log_prefix} Клиент не верифицирован или данные недоступны")
+    except Exception as e_client_ctx:
+        logger.warning(f"{log_prefix} Не удалось загрузить контекст клиента: {e_client_ctx}")
+    
+    # 🆕 ДОБАВЛЯЕМ ИНФОРМАЦИЮ О ТЕКУЩЕЙ ТЕМЕ ДИАЛОГА
+    product_context_info = ""
+    if current_topic:
+        product_context_info = f"""
+=== ТЕКУЩАЯ ТЕМА ДИАЛОГА ===
+📚 Клиент сейчас говорит про: {current_topic}
+⚠️ ФОКУСИРУЙСЯ ТОЛЬКО на этой теме!
+⚠️ НЕ переключайся на другие услуги до завершения текущей темы!
+⚠️ Вся информация из контекста ниже относится к: {current_topic}
+
+💡 Если клиент спрашивает про ДРУГУЮ услугу — вызови set_conversation_topic(topic="...") 
+   для переключения темы.
+=====================================
+
+"""
+        logger.info(f"{log_prefix} ✅ Добавлена информация о текущей теме в промпт: {current_topic}")
+    else:
+        logger.debug(f"{log_prefix} ℹ️ Тема диалога не установлена (первое сообщение или общий вопрос)")
+    
+    full_prompt = (
+        f"Сегодня: {now_str}.\n"
+        f"Telegram User ID: {user_id}\n"
+        f"{client_context_info}\n"
+        f"{product_context_info}\n"  # 🔥 ДОБАВИЛИ!
+        + full_prompt
+    )
     # --- КОНЕЦ ДОБАВЛЕНИЯ ---
 
     logger.debug(f"{log_prefix} Вызов add_message_to_history для user_input...")
@@ -787,7 +874,15 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
                 logger.debug(f"{log_prefix} Итерация {iteration}/{MAX_TOOL_ITERATIONS}")
                 
                 try:
-                    resp = await openai_client.responses.create(**request_params)
+                    # 🔧 Добавлен timeout 60 секунд, чтобы предотвратить зависание
+                    resp = await asyncio.wait_for(
+                        openai_client.responses.create(**request_params),
+                        timeout=60.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"{log_prefix} Timeout (60s) при запросе к Responses API на итерации {iteration}")
+                    await log_context_telegram(user_id, user_input, context, f"TIMEOUT API (итерация {iteration})")
+                    return "Ошибка: запрос к AI занял слишком много времени. Попробуйте упростить вопрос."
                 except Exception as e_resp:
                     logger.error(f"{log_prefix} Ошибка Responses API: {e_resp}", exc_info=True)
                     await log_context_telegram(user_id, user_input, context, f"ОШИБКА RESPONSES API: {e_resp}")
@@ -798,10 +893,40 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
                     tool_calls = parse_tool_calls_from_response(resp)
                     logger.info(f"{log_prefix} Получено {len(tool_calls)} tool calls")
                     
+                    # 🔑 Устанавливаем user_id для контекста выполнения tools
+                    set_current_user_id(user_id)
+                    
                     # Выполняем все tool calls
                     tool_results = []
                     for tc in tool_calls:
-                        result = execute_tool_call(tc["name"], tc["arguments"])
+                        # 🔧 ВАРИАНТ 4: Проверяем, есть ли ошибка парсинга
+                        if "_error" in tc:
+                            # Возвращаем ошибку как результат tool call
+                            error_result = {
+                                "success": False,
+                                "error": tc["_error"],
+                                "message": "Не удалось обработать запрос. Попробуйте сформулировать короче."
+                            }
+                            tool_results.append(error_result)
+                            logger.warning(f"{log_prefix} Tool {tc['name']} имеет ошибку парсинга: {tc['_error'][:100]}")
+                            continue
+                        
+                        # 🔑 ПЕРЕДАЁМ ТЕКУЩИЙ КОНТЕКСТ РЕБЁНКА
+                        current_child = current_child_context.get(user_id)
+                        
+                        result = execute_tool_call(
+                            tc["name"], 
+                            tc["arguments"],
+                            current_child_login=current_child
+                        )
+                        
+                        # 💾 СОХРАНЯЕМ ВЫБОР РЕБЁНКА
+                        if tc["name"] == "set_active_child" and result.get("success"):
+                            selected_login = result.get("login")
+                            if selected_login:
+                                current_child_context[user_id] = selected_login
+                                logger.info(f"✅ User {user_id} выбрал ребёнка: {selected_login}")
+                        
                         tool_results.append(result)
                         logger.debug(f"{log_prefix} Tool {tc['name']}: {json.dumps(result, ensure_ascii=False)[:200]}...")
                     
@@ -853,17 +978,43 @@ async def chat_with_assistant(user_id: int, user_input: str) -> str:
     return "Ошибка конфигурации системы. Обратитесь к администратору."
 
 # --- Vector Store Management (ChromaDB) ---
-async def get_relevant_context_telegram(query: str, k: int) -> str:
+async def get_relevant_context_telegram(
+    query: str, 
+    k: int,
+    conversation_topic: Optional[str] = None,
+    user_id: Optional[int] = None
+) -> str:
+    """
+    Получить релевантный контекст из векторной базы.
+    
+    Args:
+        query: Исходный запрос пользователя
+        k: Количество документов для возврата
+        conversation_topic: Текущая тема разговора (например: "математика STEM", "английский язык")
+        user_id: ID пользователя для логирования
+    
+    Returns:
+        Строка с контекстом из базы знаний
+    """
     if not vector_collection:
         logger.warning("Запрос контекста (TG), но vector_collection не инициализирована.")
         return ""
     try:
+        # 🔥 РАСШИРЯЕМ ЗАПРОС ТЕКУЩЕЙ ТЕМОЙ ДИАЛОГА
+        enhanced_query = query
+        
+        if conversation_topic:
+            enhanced_query = f"{conversation_topic} {query}"
+            logger.info(f"🔍 User {user_id}: запрос расширен темой '{conversation_topic}'")
+            logger.debug(f"   Исходный запрос: '{query}'")
+            logger.debug(f"   Расширенный: '{enhanced_query}'")
+        
         try:
             query_embedding_response = await openai_client.embeddings.create(
-                 input=[query], model=OPENAI_EMBEDDING_MODEL, dimensions=OPENAI_EMBEDDING_DIMENSIONS
+                 input=[enhanced_query], model=OPENAI_EMBEDDING_MODEL, dimensions=OPENAI_EMBEDDING_DIMENSIONS
             )
             query_embedding = query_embedding_response.data[0].embedding
-            logger.debug(f"Эмбеддинг для запроса (TG) '{query[:50]}...' создан.")
+            logger.debug(f"Эмбеддинг для запроса (TG) '{enhanced_query[:50]}...' создан.")
         except Exception as e_embed:
             logger.error(f"Ошибка создания эмбеддинга (TG): {e_embed}", exc_info=True)
             return ""
@@ -871,7 +1022,7 @@ async def get_relevant_context_telegram(query: str, k: int) -> str:
         def _query_chroma():
             return vector_collection.query(query_embeddings=[query_embedding], n_results=k, include=["documents", "metadatas"]) # Убрали distances для упрощения
         results = await asyncio.to_thread(_query_chroma)
-        logger.debug(f"Поиск в ChromaDB (TG) для '{query[:50]}...' выполнен.")
+        logger.debug(f"Поиск в ChromaDB (TG) для '{enhanced_query[:50]}...' выполнен.")
 
         if not results or not results.get("ids") or not results["ids"][0] or \
            not results.get("documents") or not results["documents"][0]:
@@ -1131,6 +1282,10 @@ async def reset_conversation_command(message: aiogram_types.Message):
             if not timer.done(): timer.cancel()
         # --- Очищаем историю в памяти ---
         if user_id in user_messages: del user_messages[user_id]
+        # --- Очищаем контекст ребёнка ---
+        if user_id in current_child_context: del current_child_context[user_id]
+        # --- Очищаем тему диалога ---
+        clear_conversation_topic(user_id)
     # --- Удаляем файл истории пользователя ---
     history_file = os.path.join(HISTORY_DIR, f"history_{user_id}.jsonl")
     if os.path.exists(history_file):
@@ -1157,6 +1312,12 @@ async def reset_all_command(message: aiogram_types.Message):
     pending_messages.clear()
     user_messages_cleared = len(user_messages)
     user_messages.clear()
+    # --- Очищаем контекст всех детей ---
+    child_contexts_cleared = len(current_child_context)
+    current_child_context.clear()
+    # --- Очищаем темы всех диалогов ---
+    topics_cleared = len(current_product_context)
+    current_product_context.clear()
     # --- Удаляем все файлы истории ---
     for fname in glob.glob(os.path.join(HISTORY_DIR, "history_*.jsonl")):
         try:
@@ -1168,6 +1329,8 @@ async def reset_all_command(message: aiogram_types.Message):
                          f"- Таймеров отменено: {timers_cancelled}\n"
                          f"- Буферов очищено: {pending_messages_cleared}\n"
                          f"- Историй (память): {user_messages_cleared}\n"
+                         f"- Контекстов детей очищено: {child_contexts_cleared}\n"
+                         f"- Тем диалогов очищено: {topics_cleared}\n"
                          f"- Файлы истории удалены: да")
 
 @router.message(Command("speak"))
@@ -1291,6 +1454,70 @@ async def list_verifications_command(message: aiogram_types.Message):
     except Exception as e:
         logger.error(f"Ошибка получения списка верификаций: {e}", exc_info=True)
         await message.answer("❌ Ошибка получения списка верификаций.")
+
+@router.message(Command("current_child"))
+async def current_child_command(message: aiogram_types.Message):
+    """Показать текущего выбранного ребёнка."""
+    user_id = message.from_user.id
+    
+    if user_id not in current_child_context:
+        await message.answer("ℹ️ Ребёнок не выбран. Бот автоматически определит его при первом запросе.")
+        return
+    
+    current_login = current_child_context[user_id]
+    
+    # Загружаем данные ребёнка
+    from tools.client_tools import load_clients
+    clients = await asyncio.to_thread(load_clients)
+    
+    client = next((c for c in clients if c.get('login') == current_login), None)
+    
+    if client:
+        student = client.get('student', {})
+        name = f"{student.get('last_name', '')} {student.get('first_name', '')}".strip()
+        branch = student.get('branch', 'Неизвестно')
+        group = student.get('group', 'Неизвестно')
+        
+        await message.answer(
+            f"👶 Текущий ребёнок:\n\n"
+            f"👤 {name}\n"
+            f"📱 Логин: {current_login}\n"
+            f"🏫 Филиал: {branch}\n"
+            f"👥 Группа: {group}\n\n"
+            f"💡 Все запросы баланса/транзакций будут автоматически использовать этого ребёнка."
+        )
+    else:
+        await message.answer(
+            f"⚠️ Выбран логин {current_login}, но данные не найдены.\n"
+            f"Используйте /reset для сброса."
+        )
+
+@router.message(Command("current_topic"))
+async def current_topic_command(message: aiogram_types.Message):
+    """Показать текущую тему диалога."""
+    user_id = message.from_user.id
+    
+    current_topic = get_conversation_topic(user_id)
+    
+    if not current_topic:
+        await message.answer(
+            "ℹ️ Тема диалога не установлена.\n\n"
+            "💡 Бот автоматически определит её, когда вы упомянете конкретную услугу:\n"
+            "• английский язык\n"
+            "• математика STEM\n"
+            "• китайский язык\n"
+            "• лагерь\n"
+            "• и другие..."
+        )
+        return
+    
+    await message.answer(
+        f"📚 Текущая тема диалога:\n\n"
+        f"🎯 {current_topic}\n\n"
+        f"💡 Все запросы к базе знаний фокусируются на этой теме.\n"
+        f"🔄 Чтобы сбросить — используйте /reset\n"
+        f"🔀 Чтобы сменить тему — упомяните другую услугу в диалоге"
+    )
 
 # --- Message Handlers ---
 # Важно: хендлеры команд должны быть зарегистрированы в router ДО общих хендлеров сообщений,

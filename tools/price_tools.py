@@ -86,7 +86,7 @@ def get_prices(
             - "general" — общий диапазон цен (когда клиент просто спрашивает "сколько стоит")
             - "by_course" — цены для конкретного курса
             - "exact" — точная цена (когда известны курс + филиал/ценовая категория)
-        course: Название курса (pe_kids, pe_start, pe_five, pe_future, oge_ege, pe_world, pe_online, chinese)
+        course: Название курса (pe_kids, pe_start, pe_five, pe_future, oge_ege, pe_world, pe_online, chinese, stem_math)
         price_tier: Ценовая категория ("standard" или "reduced")
         schedule_type: Тип расписания ("weekdays" или "weekends") - только для PE Start и китайского
         branch_name: Название филиала для автоматического определения price_tier
@@ -587,7 +587,7 @@ PRICES_FUNCTION_PARAMETERS = {
             "enum": [
                 "pe_kids", "pe_start", "pe_five", "pe_future", 
                 "oge_ege", "pe_world", "pe_online", "chinese",
-                "individual", "mini_groups"
+                "stem_math", "individual", "mini_groups"
             ],
             "description": (
                 "Название курса: "
@@ -599,6 +599,7 @@ PRICES_FUNCTION_PARAMETERS = {
                 "pe_world — взрослые от 18 лет, "
                 "pe_online — онлайн-формат, "
                 "chinese — китайский язык, "
+                "stem_math — школа креативной математики (1-4 классы), "
                 "individual — индивидуальные занятия (ТОЛЬКО по запросу клиента!), "
                 "mini_groups — мини-группы 2-4 человека (ТОЛЬКО по запросу клиента!)"
             )

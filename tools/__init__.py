@@ -28,6 +28,7 @@ from .client_tools import (
     find_clients_by_phone,
     get_client_balance,
     get_recent_transactions,
+    calculate_next_month_payment,
     get_verified_client_data,
     normalize_phone,
     TOOLS as CLIENT_TOOLS_DEFINITIONS,
@@ -35,6 +36,7 @@ from .client_tools import (
     get_find_by_phone_tool_for_responses_api,
     get_client_balance_tool_for_responses_api,
     get_recent_transactions_tool_for_responses_api,
+    get_calculate_payment_tool_for_responses_api,
 )
 from .verification_tools import (
     reset_verification,
@@ -44,6 +46,16 @@ from .verification_tools import (
     get_check_verification_tool_for_responses_api,
     get_save_verification_tool_for_responses_api,
 )
+from .conversation_tools import (
+    set_conversation_topic,
+    get_conversation_topic,
+    clear_conversation_topic,
+    get_all_topics,
+    set_current_user_id,
+    get_conversation_topic_tool_for_responses_api,
+    CONVERSATION_TOPIC_FUNCTION_NAME,
+    _conversation_topics as conversation_topics_storage,
+)
 from .tool_executor import (
     get_tools_for_api,
     execute_tool_call,
@@ -51,6 +63,7 @@ from .tool_executor import (
     format_tool_results_for_api,
     has_tool_calls,
     get_text_from_response,
+    extract_formatted_message,
     AVAILABLE_TOOLS,
     TOOL_FUNCTIONS,
 )
@@ -83,11 +96,13 @@ __all__ = [
     "normalize_phone",
     "get_client_balance",
     "get_recent_transactions",
+    "calculate_next_month_payment",
     "CLIENT_TOOLS_DEFINITIONS",
     "get_search_client_tool_for_responses_api",
     "get_find_by_phone_tool_for_responses_api",
     "get_client_balance_tool_for_responses_api",
     "get_recent_transactions_tool_for_responses_api",
+    "get_calculate_payment_tool_for_responses_api",
     # Verification tools
     "reset_verification",
     "get_all_verifications",
@@ -95,6 +110,15 @@ __all__ = [
     "save_verification",
     "get_check_verification_tool_for_responses_api",
     "get_save_verification_tool_for_responses_api",
+    # Conversation context tools
+    "set_conversation_topic",
+    "get_conversation_topic",
+    "clear_conversation_topic",
+    "get_all_topics",
+    "set_current_user_id",
+    "get_conversation_topic_tool_for_responses_api",
+    "CONVERSATION_TOPIC_FUNCTION_NAME",
+    "conversation_topics_storage",
     # Tool executor
     "get_tools_for_api",
     "execute_tool_call",
@@ -102,6 +126,7 @@ __all__ = [
     "format_tool_results_for_api",
     "has_tool_calls",
     "get_text_from_response",
+    "extract_formatted_message",
     "AVAILABLE_TOOLS",
     "TOOL_FUNCTIONS",
 ]

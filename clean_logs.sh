@@ -50,3 +50,4 @@ echo "   Размер archive/: $(du -sh "$ARCHIVE_DIR" 2>/dev/null | cut -f1)"
 
 echo ""
 echo "✅ Очистка завершена!"
+

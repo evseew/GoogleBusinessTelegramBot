@@ -14,6 +14,7 @@ show_help() {
     echo "  start   - Запустить бота"
     echo "  stop    - Остановить бота"
     echo "  restart - Перезапустить бота"
+    echo "  refresh - Перезапустить бота + обновить все данные"
     echo "  status  - Показать статус бота"
     echo "  logs    - Показать последние 50 строк логов (используйте Ctrl+C для выхода)"
     echo "  update  - Обновить базу знаний"
@@ -38,6 +39,41 @@ stop_bot() {
 restart_bot() {
     echo "🔄 Перезапускаем сервис google-business-bot..."
     systemctl restart google-business-bot
+}
+
+# Функция для перезапуска бота с обновлением данных
+refresh_bot() {
+    echo "🔄 Перезапускаем сервис google-business-bot..."
+    systemctl restart google-business-bot
+    
+    echo "📥 Запускаем обновление данных в фоне..."
+    
+    # Обновление групп
+    if [ -f "$SCRIPT_DIR/scripts/update_groups.sh" ]; then
+        echo "  → Обновление групп..."
+        nohup "$SCRIPT_DIR/scripts/update_groups.sh" >> "$LOG_DIR/refresh_groups.log" 2>&1 &
+    fi
+    
+    # Синхронизация данных 1С (contracts - балансы и бонусы)
+    if [ -f "$SCRIPT_DIR/scripts/sync_1c_hourly.sh" ]; then
+        echo "  → Синхронизация контрактов..."
+        nohup "$SCRIPT_DIR/scripts/sync_1c_hourly.sh" >> "$LOG_DIR/refresh_1c.log" 2>&1 &
+    fi
+    
+    # Синхронизация клиентов 1С
+    if [ -f "$SCRIPT_DIR/scripts/sync_1c_daily.sh" ]; then
+        echo "  → Синхронизация клиентов..."
+        nohup "$SCRIPT_DIR/scripts/sync_1c_daily.sh" >> "$LOG_DIR/refresh_1c_daily.log" 2>&1 &
+    fi
+    
+    # Обновление базы знаний (может быть долгим, запускаем последним)
+    if [ -f "$SCRIPT_DIR/update_db.sh" ]; then
+        echo "  → Обновление базы знаний..."
+        nohup "$SCRIPT_DIR/update_db.sh" >> "$LOG_DIR/refresh_kb.log" 2>&1 &
+    fi
+    
+    echo "✅ Бот перезапущен, обновление данных запущено в фоне"
+    echo "📋 Логи обновления: logs/refresh_*.log"
 }
 
 # Функция для проверки статуса бота (через systemd)
@@ -123,6 +159,9 @@ case "$1" in
         ;;
     restart)
         restart_bot
+        ;;
+    refresh)
+        refresh_bot
         ;;
     status)
         status_bot

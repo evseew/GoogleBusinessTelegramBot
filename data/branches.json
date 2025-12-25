@@ -13,6 +13,7 @@
       "landmark": "ТК Кнопка, рядом с ТК Прииск, напротив ТК Космос",
       "entrance": "С левого торца здания, крыльцо Planet English",
       "floor": "3 этаж",
+      "intercom_note": "Домофона нет",
       "bus_stop": "Прииск",
       "has_admin": true,
       "admin_hours": {
@@ -33,6 +34,7 @@
       "landmark": "Напротив ТК Чайка, рядом с ТК Родник",
       "entrance": "Отдельное крыльцо, смотрит на ул. Чайковского",
       "floor": null,
+      "intercom_code": "45654",
       "bus_stop": "Улица Чайковского",
       "has_admin": true,
       "admin_hours": {
@@ -53,6 +55,7 @@
       "landmark": "ЖК Академ Риверсайд, напротив школы",
       "entrance": "Отдельный вход",
       "floor": null,
+      "intercom_code": "78951",
       "bus_stop": "Улица Братьев Кашириных",
       "has_admin": false,
       "admin_hours": null
@@ -70,6 +73,7 @@
       "landmark": "Рядом с аптекой, напротив строящегося аквапарка, ЖК Ньютон",
       "entrance": "Отдельный вход, крыльцо Planet English",
       "floor": null,
+      "intercom_code": "25852",
       "bus_stop": "Улица Макеева",
       "has_admin": false,
       "admin_hours": null
@@ -87,6 +91,7 @@
       "landmark": "Напротив ресторана Оливер, напротив Сбербанка",
       "entrance": "Отдельное крыльцо",
       "floor": null,
+      "intercom_code": "25852",
       "bus_stop": "53 микрорайон",
       "has_admin": true,
       "admin_hours": {
@@ -107,6 +112,7 @@
       "landmark": "Напротив Горбольницы, возле школы №147, офисное здание где Монетка",
       "entrance": "Главный вход здания",
       "floor": "5 этаж (лифт), по коридору налево",
+      "intercom_note": "Домофона нет",
       "bus_stop": "Горбольница",
       "has_admin": true,
       "admin_hours": {
@@ -127,6 +133,7 @@
       "landmark": "У главного входа в парк Гагарина, здание с Веладент",
       "entrance": "С правого торца, отдельное крыльцо",
       "floor": "3 этаж",
+      "intercom_note": "Кнопка входа внизу, в тамбуре",
       "bus_stop": "Гражданпроект",
       "has_admin": false,
       "admin_hours": null
@@ -144,6 +151,7 @@
       "landmark": "Дом с красными балконами, рядом с ТРК Аврора",
       "entrance": "По центру здания",
       "floor": "2 этаж",
+      "intercom_note": "Код домофона пока не установлен. Временно: нажмите кнопку консьерж или звоните 8(351)24-000-34",
       "bus_stop": "ТРК Аврора",
       "has_admin": true,
       "admin_hours": {
@@ -164,6 +172,7 @@
       "landmark": "В здании с Пятёрочкой",
       "entrance": "Через магазин Пятёрочка, затем направо",
       "floor": "3 этаж",
+      "intercom_code": "75357",
       "bus_stop": "Шатура",
       "has_admin": true,
       "admin_hours": {
@@ -184,6 +193,7 @@
       "landmark": "На площади у кинотеатра Россия, где зимой ледовый городок",
       "entrance": "Отдельное крыльцо",
       "floor": null,
+      "intercom_code": "45654",
       "bus_stop": "Кинотеатр Россия",
       "has_admin": true,
       "admin_hours": {
@@ -204,6 +214,7 @@
       "landmark": "Напротив детского садика, соседнее крыльцо от магазина Огурец",
       "entrance": "Отдельное крыльцо",
       "floor": null,
+      "intercom_code": "85258",
       "bus_stop": "Улица Зальцмана",
       "has_admin": true,
       "admin_hours": {
@@ -224,6 +235,7 @@
       "landmark": "Около налоговой инспекции",
       "entrance": "Отдельное крыльцо",
       "floor": null,
+      "intercom_code": "25852",
       "bus_stop": "Налоговая инспекция",
       "has_admin": true,
       "admin_hours": {
@@ -244,6 +256,7 @@
       "landmark": null,
       "entrance": "Отдельное крыльцо",
       "floor": null,
+      "intercom_note": "Домофон работает по QR коду. Необходимо продемонстрировать его в камеру домофона",
       "bus_stop": "Салон Молодость",
       "has_admin": false,
       "admin_hours": null

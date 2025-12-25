@@ -6,7 +6,7 @@
 
 import json
 import os
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
 import logging
 
@@ -80,12 +80,26 @@ def _migrate_old_format(data: Dict) -> Dict:
 
 def _load_verifications() -> Dict:
     """Загрузить верификации из файла с автоматической миграцией"""
+    # Создаём директорию, если не существует
+    os.makedirs(os.path.dirname(VERIFICATIONS_FILE), exist_ok=True)
+    
     if not os.path.exists(VERIFICATIONS_FILE):
+        logger.info(f"Файл верификаций {VERIFICATIONS_FILE} не найден, создаём пустой")
+        # Инициализируем пустой файл
+        _save_verifications({})
         return {}
     
     try:
         with open(VERIFICATIONS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            content = f.read().strip()
+            
+            # Если файл пустой — инициализируем
+            if not content:
+                logger.info(f"Файл верификаций {VERIFICATIONS_FILE} пустой, инициализируем")
+                _save_verifications({})
+                return {}
+            
+            data = json.loads(content)
         
         # Проверяем, нужна ли миграция
         needs_migration = False
@@ -102,6 +116,11 @@ def _load_verifications() -> Dict:
             logger.info("Миграция верификаций завершена успешно")
         
         return data
+    except json.JSONDecodeError as e:
+        logger.error(f"Ошибка парсинга JSON верификаций: {e}. Создаём новый файл.")
+        # Если файл повреждён — создаём новый
+        _save_verifications({})
+        return {}
     except Exception as e:
         logger.error(f"Ошибка загрузки верификаций: {e}")
         return {}
@@ -130,6 +149,32 @@ def save_verification(telegram_user_id: int, client_login: str) -> str:
     Returns:
         Сообщение о результате
     """
+    # 🔒 ВАЛИДАЦИЯ: Проверяем, что это логин, а не телефон
+    if not client_login or not isinstance(client_login, str):
+        error_msg = f"❌ ОШИБКА: Некорректный логин '{client_login}'. Логин должен быть строкой."
+        logger.error(f"save_verification: {error_msg} telegram_user={telegram_user_id}")
+        return error_msg
+    
+    # Логин должен быть числовым (может содержать только цифры) и короче 10 символов
+    # Телефоны обычно 11+ символов, логины — 4-6 символов
+    if len(client_login) > 10:
+        error_msg = (
+            f"❌ ОШИБКА: '{client_login}' похоже на телефон (слишком длинный для логина). "
+            f"Логин — это короткий числовой лицевой счёт (например '26643'). "
+            f"Используйте поле 'login' из результата find_clients_by_phone!"
+        )
+        logger.error(f"save_verification: {error_msg} telegram_user={telegram_user_id}")
+        return error_msg
+    
+    # Проверяем, что это число
+    if not client_login.isdigit():
+        error_msg = (
+            f"❌ ОШИБКА: Логин '{client_login}' должен содержать только цифры. "
+            f"Проверьте, что вы используете поле 'login' из результата find_clients_by_phone."
+        )
+        logger.error(f"save_verification: {error_msg} telegram_user={telegram_user_id}")
+        return error_msg
+    
     verifications = _load_verifications()
     user_key = str(telegram_user_id)
     
@@ -331,9 +376,265 @@ def get_all_verifications() -> str:
     return '\n'.join(lines)
 
 
+# === Новые функции для автоматического определения логина ===
+
+def get_verified_login_with_context(
+    telegram_user_id: int, 
+    current_child_login: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Получить логин верифицированного клиента с учётом контекста.
+    
+    Args:
+        telegram_user_id: ID пользователя в Telegram
+        current_child_login: Текущий выбранный ребёнок (если есть)
+    
+    Returns:
+        {
+            "status": "ok" | "not_verified" | "select_child",
+            "login": str,  # Если status == "ok"
+            "children": List[Dict],  # Если status == "select_child"
+            "message": str
+        }
+    """
+    verifications = _load_verifications()
+    user_key = str(telegram_user_id)
+    
+    # Проверка 1: Есть ли верификация?
+    if user_key not in verifications:
+        return {
+            "status": "not_verified",
+            "message": "Необходимо пройти верификацию по номеру телефона."
+        }
+    
+    logins = verifications[user_key].get('logins', [])
+    
+    if not logins:
+        return {
+            "status": "not_verified",
+            "message": "Верификация не найдена."
+        }
+    
+    # Проверка 2: Один ребёнок — сразу возвращаем
+    if len(logins) == 1:
+        login = logins[0]
+        if is_client_verified(telegram_user_id, login):
+            return {
+                "status": "ok",
+                "login": login,
+                "message": f"Используется логин: {login}"
+            }
+        else:
+            return {
+                "status": "not_verified",
+                "message": "Срок верификации истёк."
+            }
+    
+    # Проверка 3: Несколько детей
+    # Если уже выбран ребёнок в контексте — используем его
+    if current_child_login and current_child_login in logins:
+        if is_client_verified(telegram_user_id, current_child_login):
+            return {
+                "status": "ok",
+                "login": current_child_login,
+                "message": f"Используется логин: {current_child_login}"
+            }
+    
+    # Проверка 4: Нужен выбор ребёнка — загружаем имена
+    from .client_tools import load_clients
+    clients = load_clients()
+    
+    children = []
+    for login in logins:
+        if is_client_verified(telegram_user_id, login):
+            client = next((c for c in clients if c.get('login') == login), None)
+            if client:
+                student = client.get('student', {})
+                children.append({
+                    "login": login,
+                    "name": f"{student.get('last_name', '')} {student.get('first_name', '')}".strip(),
+                    "phone": client.get('contacts', {}).get('phone', '')
+                })
+    
+    return {
+        "status": "select_child",
+        "children": children,
+        "message": f"У вас {len(children)} детей. О каком ребёнке вы хотите узнать?"
+    }
+
+
+def get_client_context(telegram_user_id: int) -> Dict[str, Any]:
+    """
+    Получить полный контекст верифицированного клиента для персонализации.
+    
+    ВАЖНО: Вызывай КАЖДЫЙ РАЗ при формировании ответа!
+    Данные всегда свежие (группа, преподаватель, филиал могут меняться).
+    
+    Функция автоматически:
+    1. Проверяет верификацию клиента
+    2. Загружает актуальные данные из базы (ФИО, филиал, группу, преподавателя)
+    3. Возвращает готовый контекст для персонализированного общения
+    
+    НЕ ВОЗВРАЩАЕТ: баланс и транзакции (они запрашиваются отдельно через get_client_balance и get_recent_transactions)
+    
+    Args:
+        telegram_user_id: ID пользователя в Telegram
+    
+    Returns:
+        {
+            "is_verified": bool,
+            "login": str | None,
+            "client_name": str | None,        # ФИО родителя (Имя Отчество)
+            "student_name": str | None,       # ФИО ребенка
+            "student_age": int | None,
+            "branch": str | None,             # Филиал обучения
+            "group": str | None,              # Группа (номер + программа)
+            "teacher": str | None,            # ФИО преподавателя
+            "phone": str | None,              # Телефон родителя
+            "message": str
+        }
+    """
+    verifications = _load_verifications()
+    user_key = str(telegram_user_id)
+    
+    # Шаг 1: Проверка верификации
+    if user_key not in verifications:
+        return {
+            "is_verified": False,
+            "message": "Клиент не верифицирован. Предложите верификацию по номеру телефона или логину."
+        }
+    
+    user_data = verifications[user_key]
+    logins = user_data.get('logins', [])
+    
+    if not logins:
+        return {
+            "is_verified": False,
+            "message": "Верификация не найдена."
+        }
+    
+    # Если несколько детей — берём первого (или можно добавить логику выбора через set_active_child)
+    login = logins[0]
+    
+    # Шаг 2: Проверка срока действия верификации
+    if not is_client_verified(telegram_user_id, login):
+        return {
+            "is_verified": False,
+            "message": "Срок верификации истёк. Требуется повторная верификация."
+        }
+    
+    # Шаг 3: Загрузка актуальных данных клиента
+    from .client_tools import get_verified_client_data
+    
+    client_data = get_verified_client_data(login)
+    
+    if not client_data:
+        return {
+            "is_verified": True,
+            "login": login,
+            "message": f"Верификация OK, но данные не найдены для логина {login}"
+        }
+    
+    # Шаг 4: Возврат полного контекста для персонализации
+    return {
+        "is_verified": True,
+        "login": login,
+        "client_name": client_data.get('client_name'),
+        "student_name": client_data.get('student_name'),
+        "student_age": client_data.get('student_age'),
+        "branch": client_data.get('branch_name'),  # Исправлено: было 'branch'
+        "group": client_data.get('group_number'),
+        "teacher": client_data.get('teacher'),  # Исправлено: было 'teacher_name'
+        "phone": client_data.get('client_phone'),
+        "message": "Клиент верифицирован. Используйте персонализацию: обращайтесь по имени-отчеству к родителю, упоминайте имя ребенка, филиал, группу и преподавателя в ответах."
+    }
+
+
+def set_active_child(telegram_user_id: int, child_identifier: str) -> Dict[str, Any]:
+    """
+    Устанавливает активного ребёнка для пользователя.
+    
+    Args:
+        telegram_user_id: ID пользователя
+        child_identifier: Имя, логин или номер ребёнка
+    
+    Returns:
+        Результат установки
+    """
+    verifications = _load_verifications()
+    user_key = str(telegram_user_id)
+    
+    if user_key not in verifications:
+        return {
+            "success": False,
+            "message": "Верификация не найдена"
+        }
+    
+    logins = verifications[user_key].get('logins', [])
+    
+    if not logins:
+        return {
+            "success": False,
+            "message": "Нет верифицированных детей"
+        }
+    
+    from .client_tools import load_clients
+    clients = load_clients()
+    
+    # Пытаемся найти ребёнка по идентификатору
+    selected_login = None
+    
+    # Вариант 1: Это номер (1, 2, 3...)
+    if child_identifier.strip().isdigit():
+        index = int(child_identifier.strip()) - 1
+        if 0 <= index < len(logins):
+            selected_login = logins[index]
+    
+    # Вариант 2: Это логин
+    elif child_identifier in logins:
+        selected_login = child_identifier
+    
+    # Вариант 3: Это имя ребёнка (поиск по имени)
+    else:
+        for login in logins:
+            client = next((c for c in clients if c.get('login') == login), None)
+            if client:
+                student = client.get('student', {})
+                # Полное ФИО
+                full_name = f"{student.get('last_name', '')} {student.get('first_name', '')} {student.get('middle_name', '')}".strip().lower()
+                # Только имя
+                first_name = student.get('first_name', '').lower()
+                
+                if child_identifier.lower() in full_name or child_identifier.lower() == first_name:
+                    selected_login = login
+                    break
+    
+    if selected_login:
+        # Находим имя для подтверждения
+        client = next((c for c in clients if c.get('login') == selected_login), None)
+        if client:
+            student = client.get('student', {})
+            child_name = f"{student.get('last_name', '')} {student.get('first_name', '')}".strip()
+        else:
+            child_name = selected_login
+        
+        return {
+            "success": True,
+            "login": selected_login,
+            "name": child_name,
+            "message": f"Выбран ребёнок: {child_name} (логин {selected_login})"
+        }
+    else:
+        return {
+            "success": False,
+            "message": f"Ребёнок '{child_identifier}' не найден среди верифицированных"
+        }
+
+
 # === Константы для функций ===
 CHECK_VERIFICATION_FUNCTION_NAME = "check_verification"
 SAVE_VERIFICATION_FUNCTION_NAME = "save_verification"
+SET_ACTIVE_CHILD_FUNCTION_NAME = "set_active_child"
 
 
 # Определения инструментов для OpenAI Function Calling
@@ -371,7 +672,22 @@ VERIFICATION_TOOLS = [
             "description": (
                 "Сохраняет верификацию клиента ПОСЛЕ успешного подтверждения. "
                 "Вызывай СРАЗУ ПОСЛЕ того, как клиент подтвердил 'Да' на вопрос 'Это данные вашего ребёнка?' "
-                "или после успешной проверки телефона + подтверждения ФИО."
+                "или после успешной проверки телефона + подтверждения ФИО. "
+                "\n\n⚠️ КРИТИЧЕСКИ ВАЖНО - КАК НАЙТИ ПРАВИЛЬНЫЙ ЛОГИН:\n"
+                "1. ПОСМОТРИ В ИСТОРИЮ ДИАЛОГА - найди сообщение с результатом find_clients_by_phone\n"
+                "2. ИЗВЛЕКИ ЛОГИН из строки '📱 *Логин: XXXXX*' (где XXXXX - это нужный логин)\n"
+                "3. ИСПОЛЬЗУЙ ИМЕННО ЭТОТ ЛОГИН для сохранения верификации\n\n"
+                "ПРАВИЛЬНЫЙ АЛГОРИТМ:\n"
+                "- Пользователь дал телефон → find_clients_by_phone вернул данные с логином\n"
+                "- Ты показал: '👤 Иванов Иван / 📱 Логин: 26643'\n"
+                "- Пользователь подтвердил: 'Да'\n"
+                "- ТЫ ВЫЗЫВАЕШЬ: save_verification(telegram_user_id=123, client_login='26643')\n\n"
+                "⛔ ЗАПРЕЩЕНО:\n"
+                "- Использовать номер телефона вместо логина\n"
+                "- Придумывать логин\n"
+                "- Брать логин из старого контекста\n"
+                "- Использовать логин другого ребёнка\n\n"
+                "✅ ЛОГИН = числовой код из строки '📱 *Логин: XXXXX*' в ПРЕДЫДУЩЕМ сообщении бота!"
             ),
             "parameters": {
                 "type": "object",
@@ -382,10 +698,37 @@ VERIFICATION_TOOLS = [
                     },
                     "client_login": {
                         "type": "string",
-                        "description": "Логин клиента (лицевой счёт), который клиент подтвердил"
+                        "description": "Логин клиента (лицевой счёт) — ОБЯЗАТЕЛЬНО бери из поля 'login' результата find_clients_by_phone! Это числовой код, например '26643', НЕ телефон!"
                     }
                 },
                 "required": ["telegram_user_id", "client_login"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_active_child",
+            "description": (
+                "Устанавливает активного ребёнка, о котором идёт речь в диалоге. "
+                "Вызывай, когда родитель называет имя ребёнка или выбирает из списка. "
+                "После установки все последующие запросы (баланс, транзакции) будут автоматически "
+                "использовать данные выбранного ребёнка. "
+                "Примеры: 'про Машу', 'первого', '1', 'логин 44741', 'Иванова Мария'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "telegram_user_id": {
+                        "type": "integer",
+                        "description": "ID пользователя в Telegram"
+                    },
+                    "child_identifier": {
+                        "type": "string",
+                        "description": "Имя ребёнка, логин или номер из списка (1, 2, 3...)"
+                    }
+                },
+                "required": ["telegram_user_id", "child_identifier"]
             }
         }
     }
@@ -412,3 +755,15 @@ def get_save_verification_tool_for_responses_api():
         "description": VERIFICATION_TOOLS[1]["function"]["description"],
         "parameters": VERIFICATION_TOOLS[1]["function"]["parameters"]
     }
+
+
+def get_set_active_child_tool_for_responses_api():
+    """Возвращает инструмент set_active_child в формате Responses API."""
+    return {
+        "type": "function",
+        "name": SET_ACTIVE_CHILD_FUNCTION_NAME,
+        "description": VERIFICATION_TOOLS[2]["function"]["description"],
+        "parameters": VERIFICATION_TOOLS[2]["function"]["parameters"]
+    }
+
+

@@ -489,6 +489,53 @@
         }
       },
       "benefits": ["tax_deduction", "family_discount"]
+    },
+
+    "stem_math": {
+      "name": "STEM школа креативной математики",
+      "display_name": "STEM — школа креативной математики",
+      "description": "Дополнительные занятия по математике для детей 1–4 классов, направленные на развитие мышления, логики и интереса к решению нестандартных задач",
+      "age_range": {"min": 7, "max": 11},
+      "grade_range": {"min": 1, "max": 4},
+      "target_audience": "Младшие школьники 1-4 классов",
+      "keywords": ["математика", "stem", "стем", "стэм", "логика", "школа математики", "курсы по математике", "креативная математика", "занятия по математике"],
+      "has_schedule_options": false,
+      "recommended_price_unit": "per_month",
+      "groups": {
+        "stem_lion_cubs": {
+          "name": "STEM Lion Cubs",
+          "description": "Группа для 1-2 классов"
+        },
+        "stem_young_lions": {
+          "name": "STEM Young Lions",
+          "description": "Группа для 3-4 классов"
+        }
+      },
+      "pricing": {
+        "unified": {
+          "note": "Единая цена для всех филиалов STEM",
+          "weekends": {
+            "format": "1 раз в неделю по 1.5 ак/часа (60 минут)",
+            "lessons_per_week": 1,
+            "duration_minutes": 60,
+            "duration_academic_hours": 1.5,
+            "price_per_lesson": 980,
+            "price_per_academic_hour": 653,
+            "price_per_month": 3920,
+            "lessons_per_month": 4,
+            "recommended_price_unit": "per_month"
+          }
+        }
+      },
+      "benefits": ["tax_deduction", "family_discount", "pe_student_discount"],
+      "special_discount": {
+        "pe_student_discount": {
+          "value": 20,
+          "description": "Скидка 20% для студентов Planet English, которые уже изучают английский"
+        }
+      },
+      "enrollment_status": "Открыта предзапись в группы на январь 2026 года",
+      "locations": ["Центр: Свердловский пр., 84б", "Тополинка: Макеева, 15", "Парковый: Краснопольский, 34"]
     }
   },
 
@@ -522,9 +569,9 @@
       "description": "Стоимость занятия от 630 ₽ до 1350 ₽ в зависимости от программы и формата"
     },
     "per_month": {
-      "min": 4800,
+      "min": 3920,
       "max": 6720,
-      "description": "Стоимость в месяц от 4800 ₽ до 6720 ₽"
+      "description": "Стоимость в месяц от 3920 ₽ до 6720 ₽"
     }
   }
 }

@@ -559,6 +559,7 @@ PYRUS_FUNCTION_PARAMETERS = {
     "properties": {
         "branch_name": {
             "type": "string",
+            "maxLength": 100,
             "description": (
                 "Название филиала, администратору которого нужно передать сообщение. "
                 "Например: 'Чичерина', 'Парковый', 'ЧТЗ', 'Копейск Коммунистический', 'Online'. "
@@ -567,10 +568,12 @@ PYRUS_FUNCTION_PARAMETERS = {
         },
         "message_text": {
             "type": "string",
+            "maxLength": 2000,
             "description": (
                 "Текст сообщения для администратора филиала. "
                 "Должен содержать суть вопроса или просьбы клиента. "
-                "Сформулируй чётко и понятно. ОБЯЗАТЕЛЬНЫЙ параметр."
+                "Сформулируй чётко и понятно. ОБЯЗАТЕЛЬНЫЙ параметр. "
+                "⚠️ МАКСИМУМ 2000 символов — будь лаконичен!"
             )
         },
         "telegram_user_id": {
@@ -591,6 +594,7 @@ PYRUS_FUNCTION_PARAMETERS = {
         },
         "client_name": {
             "type": "string",
+            "maxLength": 200,
             "description": (
                 "ФИО клиента (родителя). "
                 "⚠️ Можно НЕ указывать, если передал telegram_user_id + login (заполнится автоматически). "
@@ -599,6 +603,7 @@ PYRUS_FUNCTION_PARAMETERS = {
         },
         "client_phone": {
             "type": "string",
+            "maxLength": 50,
             "description": (
                 "Контактный телефон клиента. "
                 "⚠️ Можно НЕ указывать, если передал telegram_user_id + login (заполнится автоматически)."
@@ -606,6 +611,7 @@ PYRUS_FUNCTION_PARAMETERS = {
         },
         "student_name": {
             "type": "string",
+            "maxLength": 200,
             "description": (
                 "ФИО ребёнка (студента). "
                 "⚠️ Можно НЕ указывать, если передал telegram_user_id + login (заполнится автоматически)."

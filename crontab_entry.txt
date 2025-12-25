@@ -14,6 +14,10 @@
 # Еженедельная перезагрузка бота (по воскресеньям в 4:00) для очистки памяти
 0 4 * * 0 cd /Users/test/Local_code/GoogleBusinessBot && ./restart.sh >> logs/cron_restart.log 2>&1
 
-# Обновление данных 1с:
-0 6 * * * /Users/test/Local_code/GoogleBusinessBot/scripts/sync_1c_daily.sh >> /Users/test/Local_code/GoogleBusinessBot/logs/sync_daily.log 2>&1
+# Обновление данных 1С (новая схема):
+# Каждый час - балансы и бонусы (contracts)
 0 * * * * /Users/test/Local_code/GoogleBusinessBot/scripts/sync_1c_hourly.sh >> /Users/test/Local_code/GoogleBusinessBot/logs/sync_hourly.log 2>&1
+# Каждые 4 часа - транзакции (transactions)
+0 */4 * * * /Users/test/Local_code/GoogleBusinessBot/scripts/sync_1c_4hourly.sh >> /Users/test/Local_code/GoogleBusinessBot/logs/sync_4hourly.log 2>&1
+# Раз в сутки в 6:00 - данные клиентов (clients)
+0 6 * * * /Users/test/Local_code/GoogleBusinessBot/scripts/sync_1c_daily.sh >> /Users/test/Local_code/GoogleBusinessBot/logs/sync_daily.log 2>&1

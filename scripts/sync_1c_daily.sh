@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Ежедневная синхронизация данных из 1С
-# Скачивает clients.xml и contracts.xml, конвертирует в JSON
+# Ежедневная синхронизация данных клиентов из 1С
+# Скачивает clients.xml, конвертирует в JSON
 #
 # Запускать через cron: 0 6 * * * (каждый день в 6:00)
 #
@@ -15,11 +15,11 @@ if [ -d "venv" ]; then
 fi
 
 echo "=================================================="
-echo "Ежедневная синхронизация данных 1С"
+echo "Ежедневная синхронизация данных клиентов 1С"
 echo "Время: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "=================================================="
 
-# Запускаем синхронизацию только clients и contracts
+# Запускаем синхронизацию только clients (данные клиентов и их свойства)
 /opt/homebrew/bin/python3.10 -c "
 import sys
 sys.path.insert(0, '.')
@@ -44,19 +44,13 @@ if not client.authenticate():
     logger.error('Ошибка авторизации')
     sys.exit(1)
 
-# Синхронизируем clients и contracts
-success = True
-for file_type in ['clients', 'contracts']:
-    logger.info(f'Синхронизация {file_type}...')
-    if not client.sync_file(file_type):
-        logger.error(f'Ошибка синхронизации {file_type}')
-        success = False
-
-if success:
+# Синхронизируем clients (ФИО, филиал, группа, контакты и др.)
+logger.info('Синхронизация clients (данные клиентов)...')
+if client.sync_file('clients'):
     logger.info('✅ Ежедневная синхронизация завершена успешно')
     sys.exit(0)
 else:
-    logger.error('❌ Ежедневная синхронизация завершена с ошибками')
+    logger.error('❌ Ошибка синхронизации clients')
     sys.exit(1)
 "
 

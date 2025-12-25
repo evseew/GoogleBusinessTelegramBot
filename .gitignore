@@ -59,5 +59,23 @@ service-account-key.json
 *.pem
 *.key
 
+# Dev документация и тесты (не нужны в продакшене)
+dev_docs/
+dev_tests/
+
+# Рабочие данные (генерируются на сервере, не должны быть в репозитории)
+data/branches.json
+data/groups.json
+data/prices.json
+
+# Временные файлы состояния
+telegram_silence_state.json
+crontab_entry.txt
+
+# Логи обновлений и крона
+logs/refresh_*.log
+logs/cron_*.log
+logs/groups_update.log
+
 # Другие файлы, которые могут генерироваться вашим проектом, но не нужны в Git
 # например, build/, dist/, *.egg-info/, и т.д. если применимо
