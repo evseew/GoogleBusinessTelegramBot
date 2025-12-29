@@ -10,8 +10,8 @@
 cd "$(dirname "$0")/.." || exit 1
 
 # Активируем виртуальное окружение если есть
-if [ -d "venv" ]; then
-    source venv/bin/activate
+if [ -d "new_venv" ]; then
+    source new_venv/bin/activate
 fi
 
 echo "=================================================="
