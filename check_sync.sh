@@ -91,3 +91,5 @@ echo "║     ./scripts/sync_1c_hourly.sh                              ║"
 echo "║     ./scripts/sync_1c_daily.sh                               ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 
+
+

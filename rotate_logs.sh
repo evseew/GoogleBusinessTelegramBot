@@ -13,3 +13,5 @@ find "$SCRIPT_DIR/logs" -name "*.gz" -mtime +30 -delete 2>/dev/null || true
 
 exit 0
 
+
+

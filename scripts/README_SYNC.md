@@ -44,3 +44,5 @@ Cron требует разрешения **Full Disk Access**:
 
 Подробности: `docs/SYNC_1C_SETUP.md`
 
+
+

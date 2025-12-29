@@ -20,7 +20,7 @@ echo "Время: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "=================================================="
 
 # Запускаем синхронизацию только transactions
-/opt/homebrew/bin/python3.10 -c "
+python3 -c "
 import sys
 sys.path.insert(0, '.')
 from tools.bitrix_sync import BitrixSyncClient
@@ -63,4 +63,6 @@ else
 fi
 
 exit $exit_code
+
+
 
