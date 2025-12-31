@@ -46,3 +46,4 @@ Cron требует разрешения **Full Disk Access**:
 
 
 
+

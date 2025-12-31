@@ -13,7 +13,7 @@ source .env
 mkdir -p logs
 
 # Запускаем скрипт обновления базы
-python rebuild_db_fixed.py > logs/db_update.log 2>&1
+python update_kb.py > logs/db_update.log 2>&1
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then

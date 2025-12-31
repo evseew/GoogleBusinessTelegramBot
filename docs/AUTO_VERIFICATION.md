@@ -366,3 +366,4 @@ full_prompt = f"Сегодня: {now_str}.\nTelegram User ID: {user_id}\n" + ful
 
 
 
+
